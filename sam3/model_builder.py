@@ -38,6 +38,7 @@ from sam3.model.sam3_image import Sam3Image, Sam3ImageOnVideoMultiGPU
 from sam3.model.sam3_tracking_predictor import Sam3TrackerPredictor
 from sam3.model.sam3_video_inference import Sam3VideoInferenceWithInstanceInteractivity
 from sam3.model.sam3_video_predictor import Sam3VideoPredictorMultiGPU
+from sam3.model.sam3_video_predictor_v2 import Sam3VideoPredictorMultiCPU
 from sam3.model.text_encoder_ve import VETextEncoder
 from sam3.model.tokenizer_ve import SimpleTokenizer
 from sam3.model.vitdet import ViT
@@ -815,4 +816,9 @@ def build_sam3_video_model(
 def build_sam3_video_predictor(*model_args, gpus_to_use=None, **model_kwargs):
     return Sam3VideoPredictorMultiGPU(
         *model_args, gpus_to_use=gpus_to_use, **model_kwargs
+    )
+
+def build_sam3_video_predictor_cpu(*model_args, num_workers=None, **model_kwargs): 
+    return Sam3VideoPredictorMultiCPU( 
+        *model_args, num_workers=num_workers, **model_kwargs 
     )

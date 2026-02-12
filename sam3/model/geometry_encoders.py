@@ -20,6 +20,13 @@ def is_right_padded(mask):
     return (mask.long() == torch.sort(mask.long(), dim=-1)[0]).all()
 
 
+def _safe_non_blocking(device):
+    """Check if non_blocking transfer is safe based on device type without triggering CUDA init."""
+    if isinstance(device, torch.device):
+        return device.type == "cuda"
+    return isinstance(device, str) and "cuda" in device
+
+
 def concat_padded_sequences(seq1, mask1, seq2, mask2, return_index: bool = False):
     """
     Concatenates two right-padded sequences, such that the resulting sequence
@@ -646,10 +653,7 @@ class SequenceGeometryEncoder(nn.Module):
             boxes_xyxy = box_cxcywh_to_xyxy(boxes)
             scale = torch.tensor([W, H, W, H], dtype=boxes_xyxy.dtype)
             # Only use pin_memory if CUDA is available
-            if torch.cuda.is_available():
-                scale = scale.pin_memory().to(device=boxes_xyxy.device, non_blocking=True)
-            else:
-                scale = scale.to(device=boxes_xyxy.device)
+            scale = scale.to(device=boxes_xyxy.device)
             scale = scale.view(1, 1, 4)
             boxes_xyxy = boxes_xyxy * scale
             sampled = torchvision.ops.roi_align(

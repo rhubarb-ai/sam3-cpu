@@ -23,6 +23,23 @@ except ModuleNotFoundError:
 NO_OBJ_SCORE = -1024.0
 
 
+def _safe_to_device(tensor, device):
+    """Safely move tensor to device without triggering CUDA initialization."""
+    # If tensor is already on CUDA, safe to use non_blocking
+    if tensor.is_cuda:
+        return tensor.to(device, non_blocking=True)
+    
+    # Convert device to string for comparison
+    device_str = str(device) if not isinstance(device, str) else device
+    
+    # If trying to move CPU tensor to CUDA, keep on CPU (avoids CUDA init)
+    if 'cuda' in device_str.lower():
+        return tensor  # Keep on current device (CPU)
+    
+    # CPU to CPU transfer
+    return tensor.to(device)
+
+
 class Sam3TrackerBase(torch.nn.Module):
     def __init__(
         self,
@@ -163,10 +180,8 @@ class Sam3TrackerBase(torch.nn.Module):
             return torch.zeros(len(rel_pos_list), self.mem_dim, device=device)
 
         t_diff_max = max_abs_pos - 1 if max_abs_pos is not None else 1
-        pos_enc = (
-            torch.tensor(rel_pos_list).pin_memory().to(device=device, non_blocking=True)
-            / t_diff_max
-        )
+        tensor = torch.tensor(rel_pos_list)
+        pos_enc = _safe_to_device(tensor, device) / t_diff_max
         tpos_dim = self.hidden_dim
         pos_enc = get_1d_sine_pe(pos_enc, dim=tpos_dim)
         pos_enc = self.obj_ptr_tpos_proj(pos_enc)
@@ -652,15 +667,15 @@ class Sam3TrackerBase(torch.nn.Module):
                 if prev is None:
                     continue  # skip padding frames
                 # "maskmem_features" might have been offloaded to CPU in demo use cases,
-                # so we load it back to GPU (it's a no-op if it's already on GPU).
-                feats = prev["maskmem_features"].cuda(non_blocking=True)
+                # so we load it back to device (it's a no-op if it's already on the correct device).
+                feats = _safe_to_device(prev["maskmem_features"], device)
                 seq_len = feats.shape[-2] * feats.shape[-1]
                 to_cat_prompt.append(feats.flatten(2).permute(2, 0, 1))
                 to_cat_prompt_mask.append(
                     torch.zeros(B, seq_len, device=device, dtype=bool)
                 )
                 # Spatial positional encoding (it might have been offloaded to CPU in eval)
-                maskmem_enc = prev["maskmem_pos_enc"][-1].cuda()
+                maskmem_enc = prev["maskmem_pos_enc"][-1].to(device)
                 maskmem_enc = maskmem_enc.flatten(2).permute(2, 0, 1)
 
                 if (

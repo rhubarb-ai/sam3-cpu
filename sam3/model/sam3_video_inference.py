@@ -27,6 +27,23 @@ from tqdm.auto import tqdm
 logger = get_logger(__name__)
 
 
+def _safe_to_device(tensor, device):
+    """Safely move tensor to device without triggering CUDA initialization."""
+    # If tensor is already on CUDA, safe to use non_blocking
+    if tensor.is_cuda:
+        return tensor.to(device, non_blocking=True)
+    
+    # Convert device to string for comparison
+    device_str = str(device) if not isinstance(device, str) else device
+    
+    # If trying to move CPU tensor to CUDA, keep on CPU (avoids CUDA init)
+    if 'cuda' in device_str.lower():
+        return tensor  # Keep on current device (CPU)
+    
+    # CPU to CPU transfer
+    return tensor.to(device)
+
+
 class Sam3VideoInference(Sam3VideoBase):
     TEXT_ID_FOR_TEXT = 0
     TEXT_ID_FOR_VISUAL = 1
@@ -148,7 +165,8 @@ class Sam3VideoInference(Sam3VideoBase):
             find_targets=[None] * num_frames,
             find_metadatas=[None] * num_frames,
         )
-        input_batch = copy_data_to_device(input_batch, device, non_blocking=True)
+        # copy_data_to_device already handles non_blocking internally
+        input_batch = copy_data_to_device(input_batch, device, non_blocking=False)
         inference_state["input_batch"] = input_batch
 
         # construct the placeholder interactive prompts and tracking queries
@@ -478,9 +496,7 @@ class Sam3VideoInference(Sam3VideoBase):
 
             # slice those valid entries from the original outputs
             keep_idx = torch.nonzero(keep, as_tuple=True)[0]
-            keep_idx_gpu = keep_idx.pin_memory().to(
-                device=out_binary_masks.device, non_blocking=True
-            )
+            keep_idx_gpu = _safe_to_device(keep_idx, out_binary_masks.device)
 
             out_obj_ids = torch.index_select(out_obj_ids, 0, keep_idx)
             out_probs = torch.index_select(out_probs, 0, keep_idx)

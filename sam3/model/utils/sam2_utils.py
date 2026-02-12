@@ -87,7 +87,11 @@ class AsyncVideoFrameLoader:
         img -= self.img_mean
         img /= self.img_std
         if not self.offload_video_to_cpu:
-            img = img.to(self.compute_device, non_blocking=True)
+            # Only use non_blocking if img is already on CUDA
+            if img.is_cuda:
+                img = img.to(self.compute_device, non_blocking=True)
+            else:
+                img = img.to(self.compute_device)
         self.images[index] = img
         return img
 

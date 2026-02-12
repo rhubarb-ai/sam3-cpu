@@ -12,6 +12,23 @@ from sam3.model.utils.sam2_utils import load_video_frames
 from tqdm.auto import tqdm
 
 
+def _safe_to_device(tensor, device):
+    """Safely move tensor to device without triggering CUDA initialization."""
+    # If tensor is already on CUDA, safe to use non_blocking
+    if tensor.is_cuda:
+        return tensor.to(device, non_blocking=True)
+    
+    # Convert device to string for comparison
+    device_str = str(device) if not isinstance(device, str) else device
+    
+    # If trying to move CPU tensor to CUDA, keep on CPU (avoids CUDA init)
+    if 'cuda' in device_str.lower():
+        return tensor  # Keep on current device (CPU)
+    
+    # CPU to CPU transfer
+    return tensor.to(device)
+
+
 class Sam3TrackerPredictor(Sam3TrackerBase):
     """
     The demo class that extends the `Sam3TrackerBase` to handle user interactions
@@ -79,7 +96,8 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         if offload_state_to_cpu:
             inference_state["storage_device"] = torch.device("cpu")
         else:
-            inference_state["storage_device"] = torch.device("cuda")
+            # Use the same device as the model (respects CPU/CUDA availability)
+            inference_state["storage_device"] = self.device
 
         if video_path is not None:
             images, video_height, video_width = load_video_frames(
@@ -301,7 +319,8 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
                     prev_out = obj_output_dict["non_cond_frame_outputs"].get(frame_idx)
 
             if prev_out is not None and prev_out["pred_masks"] is not None:
-                prev_sam_mask_logits = prev_out["pred_masks"].cuda(non_blocking=True)
+                device = inference_state["device"]
+                prev_sam_mask_logits = _safe_to_device(prev_out["pred_masks"], device)
                 # Clamp the scale of prev_sam_mask_logits to avoid rare numerical issues.
                 prev_sam_mask_logits = torch.clamp(prev_sam_mask_logits, -32.0, 32.0)
         current_out, _ = self._run_single_frame_inference(
@@ -470,7 +489,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         device = inference_state["device"]
         video_H = inference_state["video_height"]
         video_W = inference_state["video_width"]
-        any_res_masks = any_res_masks.to(device, non_blocking=True)
+        any_res_masks = _safe_to_device(any_res_masks, device)
         if any_res_masks.shape[-2:] == (video_H, video_W):
             video_res_masks = any_res_masks
         else:
@@ -610,7 +629,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         if run_mem_encoder:
             device = inference_state["device"]
             high_res_masks = torch.nn.functional.interpolate(
-                consolidated_out["pred_masks"].to(device, non_blocking=True),
+                _safe_to_device(consolidated_out["pred_masks"], device),
                 size=(self.image_size, self.image_size),
                 mode="bilinear",
                 align_corners=False,
@@ -1022,7 +1041,8 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
                 )
             else:
                 # Cache miss -- we will run inference on a single image
-                image = inference_state["images"][frame_idx].cuda().float().unsqueeze(0)
+                device = inference_state["device"]
+                image = inference_state["images"][frame_idx].to(device).float().unsqueeze(0)
                 backbone_out = self.forward_image(image)
                 # Cache the most recent frame's feature (for repeated interactions with
                 # a frame; we can use an LRU cache for more frames in the future).
@@ -1095,9 +1115,9 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         maskmem_features = current_out["maskmem_features"]
         if maskmem_features is not None:
             maskmem_features = maskmem_features.to(torch.bfloat16)
-            maskmem_features = maskmem_features.to(storage_device, non_blocking=True)
+            maskmem_features = _safe_to_device(maskmem_features, storage_device)
         pred_masks_gpu = current_out["pred_masks"]
-        pred_masks = pred_masks_gpu.to(storage_device, non_blocking=True)
+        pred_masks = _safe_to_device(pred_masks_gpu, storage_device)
         # "maskmem_pos_enc" is the same across frames, so we only need to store one copy of it
         maskmem_pos_enc = self._get_maskmem_pos_enc(inference_state, current_out)
         # object pointer is a small tensor, so we always keep it on GPU memory for fast access
@@ -1146,7 +1166,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         # optionally offload the output to CPU memory to save GPU space
         storage_device = inference_state["storage_device"]
         maskmem_features = maskmem_features.to(torch.bfloat16)
-        maskmem_features = maskmem_features.to(storage_device, non_blocking=True)
+        maskmem_features = _safe_to_device(maskmem_features, storage_device)
         # "maskmem_pos_enc" is the same across frames, so we only need to store one copy of it
         maskmem_pos_enc = self._get_maskmem_pos_enc(
             inference_state, {"maskmem_pos_enc": maskmem_pos_enc}
