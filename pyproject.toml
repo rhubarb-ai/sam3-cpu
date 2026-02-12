@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sam3-cpu"
+dynamic = ["version"]
+description = "SAM3 (Segment Anything Model 3) implementation with added CPU compatibility, while maintaining existing CUDA support."
+readme = "README.md"
+requires-python = ">=3.12"
+license = {file = "LICENSE"}
+authors = [
+  { name = "Dr Prashant Aparajeya", email = "p.aparajeya@aisimply.uk" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "matplotlib>=3.10.8",
+    "setuptools",
+    "torch",
+    "torchvision",
+    "numpy",
+    "pillow",
+    "huggingface-hub",
+    "iopath",
+    "einops>=0.8.2",
+    "jupyter>=1.1.1",
+    "notebook>=7.5.3",
+    "decord>=0.6.0",
+    "opencv-python>=4.13.0.92",
+    "scikit-image>=0.26.0",
+    "scikit-learn>=1.8.0",
+    "timm>=1.0.24",
+    "tqdm>=4.67.3",
+    "ftfy>=6.3.1",
+    "regex>=2026.1.15",
+    "typing-extensions>=4.15.0",
+    "pycocotools>=2.0.11",
+    "pandas>=3.0.0",
+]
+
+
+[project.urls]
+"Homepage" = "https://github.com/rhubarb-ai/sam3-cpu"
+
+[tool.setuptools.packages.find]
+include = ["sam3*"]
+exclude = ["build*", "scripts*", "notebook*"]
