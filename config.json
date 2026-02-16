@@ -1,0 +1,12 @@
+{
+  "ram_usage_percent": 0.25,
+  "min_frames": 25,
+  "chunk_overlap": 1,
+  "prefetch_threshold": 0.90,
+  "tmp_base": "/tmp/sam3-cpu",
+  "verbose": true,
+  "bpe_path": null,
+  "num_workers": null,
+  "image_inference_MB": 6755,
+  "video_inference_MB": 6895
+}

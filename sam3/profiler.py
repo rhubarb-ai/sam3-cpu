@@ -10,12 +10,23 @@ PROFILE_RESULTS = []
 
 def profile(output_json="profile_results.json",
             output_txt="profile_results.txt"):
+    """Profile decorator with global enable/disable control via sam3.__globals.ENABLE_PROFILING"""
 
     def decorator(func):
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            # Check if profiling is enabled
+            try:
+                from sam3.__globals import ENABLE_PROFILING
+            except ImportError:
+                ENABLE_PROFILING = False
+            
+            if not ENABLE_PROFILING:
+                # Profiling disabled - just call the function
+                return func(*args, **kwargs)
 
+            # Profiling enabled - measure performance
             process = psutil.Process(os.getpid())
 
             start_mem = process.memory_info().rss
@@ -66,13 +77,25 @@ def profile_v1(output_json="profile_results.json",
     """
     Decorator to measure execution time and memory usage.
     Saves results to JSON and TXT.
+    Uses tracemalloc for memory tracking.
+    Controlled by sam3.__globals.ENABLE_PROFILING.
     """
 
     def decorator(func):
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            # Check if profiling is enabled
+            try:
+                from sam3.__globals import ENABLE_PROFILING
+            except ImportError:
+                ENABLE_PROFILING = False
+            
+            if not ENABLE_PROFILING:
+                # Profiling disabled - just call the function
+                return func(*args, **kwargs)
 
+            # Profiling enabled - measure performance
             # Start tracking memory
             tracemalloc.start()
 
