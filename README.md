@@ -204,12 +204,22 @@ result = sam3.process_video_with_prompts(
 
 **Example Output:**
 ```
-📊 Chunking required for video
-  Total frames: 6364
-  Chunk size: ~591 frames
-  Number of chunks: 11
-Chunking enabled: 11 chunks, chunk_size=591, overlap=1
-Processing chunk 1/11 (frames 0-590)...
+============================================================
+📊 Video Chunking Details
+============================================================
+Video: Roger-Federer-vs-Rafael-Nadal-Wimbledon-2008_1080p
+Resolution: 1920x1080
+FPS: 25.00
+Total Frames: 6364
+Available RAM: 55.48 GB
+Memory Needed: 43.61 GB
+RAM Usage Percent: 33%
+RAM-safe Frames per Chunk: 1684
+Overlap: 1 frame(s)
+Stride: 1683 frames
+Number of Chunks: 4
+============================================================
+Processing chunk 1/4 (frames 0-1683)...
 ```
 
 ### Frame/Time Range Extraction
@@ -1149,12 +1159,29 @@ SAM3 uses several global configuration settings that can be customized:
 ```python
 from sam3.__globals import (
     TEMP_DIR,                          # /tmp/sam3-cpu (or /tmp/sam3-gpu)
-    DEFAULT_OUTPUT_DIR,                # ./sam3_output
+    DEFAULT_OUTPUT_DIR,                # ./results
     DEFAULT_PROPAGATION_DIRECTION,     # "both"
     DEFAULT_OVERLAP,                   # 1 frame
-    DEFAULT_RAM_USAGE_PERCENT,         # 0.25 (CPU)
-    DEFAULT_VRAM_USAGE_PERCENT,        # 0.95 (GPU)
+    RAM_USAGE_PERCENT,                 # 0.33 (33% for CPU)
+    VRAM_USAGE_PERCENT,                # 0.90 (90% for GPU)
 )
+```
+
+**Key Difference - CPU vs GPU**:
+- **GPU (VRAM)**: Can use 90% because GPU memory is dedicated to compute
+- **CPU (RAM)**: Uses 33% because RAM is shared with OS and applications
+- GPU chunking is more aggressive to maximize throughput
+
+### Customizing Memory Usage
+
+```python
+from sam3 import Sam3
+
+# For CPU: Using more or less RAM
+sam3_cpu = Sam3(ram_usage_percent=0.50, verbose=True)  # Use 50% of RAM
+
+# For GPU: Adjust VRAM usage (if on GPU system)
+sam3_gpu = Sam3(vram_usage_percent=0.80, verbose=True)  # Use 80% of VRAM instead of 90%
 ```
 
 ### Customizing Temporary Directory
@@ -1162,23 +1189,13 @@ from sam3.__globals import (
 ```python
 # Change temporary directory for chunks
 from sam3 import Sam3
-sam3 = Sam3(verbose=True)
+sam3 = Sam3(temp_dir="/custom/temp/dir", verbose=True)
 
-# Chunks will be  stored in custom location
-# (controlled via TEMP_DIR global)
+# Chunks will be stored in custom location
 result = sam3.process_video_with_prompts(
     video_path="video.mp4",
     prompts=["person"]
 )
-```
-
-### Adjusting Memory Usage
-
-```python
-# Adjust RAM/VRAM usage percentage
-# Edit sam3/__globals.py:
-DEFAULT_RAM_USAGE_PERCENT = 0.30   # Use 30% of RAM
-DEFAULT_VRAM_USAGE_PERCENT = 0.85  # Use 85% of VRAM
 ```
 
 **Key Configuration Points:**
@@ -1186,46 +1203,76 @@ DEFAULT_VRAM_USAGE_PERCENT = 0.85  # Use 85% of VRAM
 - **DEFAULT_OUTPUT_DIR**: Where final results (masks, videos) are saved
 - **DEFAULT_PROPAGATION_DIRECTION**: Default tracking direction ("both", "forward", "backward")
 - **DEFAULT_OVERLAP**: Frame overlap between chunks (default: 1)
-- **DEFAULT_RAM_USAGE_PERCENT**: Fraction of RAM to use for chunking (default: 0.25 = 25%)
-- **DEFAULT_VRAM_USAGE_PERCENT**: Fraction of VRAM to use for chunking (default: 0.95 = 95%)
+- **RAM_USAGE_PERCENT**: Fraction of RAM to use for CPU chunking (default: 0.33 = 33%)
+- **VRAM_USAGE_PERCENT**: Fraction of VRAM to use for GPU chunking (default: 0.90 = 90%)
 
 ## 💾 Memory Management
 
-SAM3 intelligently manages memory to handle videos of any size:
+SAM3 intelligently manages memory to handle videos of any size on both **CPU (RAM)** and **GPU (VRAM)**.
 
 ### How Memory Calculation Works
 
 ```python
-# Memory needed = frames × model_size × channels × bytes_per_float
-model_size = 1008  # SAM3 processes at 1008×1008 resolution
-channels = 3       # RGB
-bytes_per_float = 4
+# Memory needed = frames × video_width × video_height × channels × bytes_per_channel
+video_resolution = width × height  # Actual video resolution (not model size!)
+channels = 3                       # RGB
+bytes_per_channel = 1              # uint8 (video decoding)
 
-memory_needed = num_frames × 1008 × 1008 × 3 × 4
-              = num_frames × ~12.2 MB
+memory_needed = num_frames × width × height × 3 × 1
 ```
 
-**Example**: 6,364-frame video
-- **Memory needed**: 6,364 × 12.2 MB ≈ 77.6 GB
-- **Available RAM** (25%): 16 GB system → 4 GB usable
-- **Result**: Auto-chunks into 11 pieces (~591 frames each)
+**Important**: Memory calculation uses the **actual video resolution**, not the model processing size (1008×1008). Even though SAM3 resizes frames to 1008×1008 during inference, the memory footprint is determined by decoding frames at their original resolution.
+
+**Example 1**: 480p video (854×480, 6,364 frames)
+- **Memory per frame**: 854 × 480 × 3 ≈ 1.17 MB
+- **Total memory**: 6,364 × 1.17 MB ≈ 7.46 GB
+- **With 1.5× safety**: 7.46 × 1.5 ≈ 11.2 GB
+- **Available RAM** (33%): 64 GB system → 21 GB usable
+- **Result**: ✅ No chunking needed (fits in memory)
+
+**Example 2**: 1080p video (1920×1080, 6,364 frames)
+- **Memory per frame**: 1920 × 1080 × 3 ≈ 5.93 MB
+- **Total memory**: 6,364 × 5.93 MB ≈ 37.7 GB
+- **With 1.5× safety**: 37.7 × 1.5 ≈ 56.6 GB
+- **Available RAM** (33%): 64 GB system → 21 GB usable
+- **Result**: ⚠️ Chunking required → 4 chunks of ~1,684 frames each
 
 ### Chunking Strategy
 
-| Video Frames | Available RAM | Chunk Size | Number of Chunks |
-|--------------|--------------|------------|------------------|
-| 500          | 8 GB         | 500        | 1 (no chunking)  |
-| 1,000        | 8 GB         | 1,000      | 1 (no chunking)  |
-| 6,364        | 16 GB (25%)  | 591        | 11               |
-| 10,000       | 16 GB (25%)  | 500        | 20               |
+**CPU (RAM) - 33% usage:**
+
+| Video | Resolution | Frames | Available RAM | Memory Needed | Chunk Size | Chunks |
+|-------|-----------|--------|---------------|---------------|------------|--------|
+| 480p  | 854×480   | 6,364  | 64 GB (33%)   | 11.2 GB       | N/A        | 1 (no chunking) |
+| 720p  | 1280×720  | 6,364  | 64 GB (33%)   | 25.2 GB       | 2,800      | 3      |
+| 1080p | 1920×1080 | 6,364  | 64 GB (33%)   | 56.6 GB       | 1,684      | 4      |
+| 4K    | 3840×2160 | 6,364  | 64 GB (33%)   | 226 GB        | 420        | 16     |
+
+**GPU (VRAM) - 90% usage:**
+
+| Video | Resolution | Frames | Available VRAM | Memory Needed | Chunk Size | Chunks |
+|-------|-----------|--------|----------------|---------------|------------|--------|
+| 480p  | 854×480   | 6,364  | 24 GB (90%)    | 11.2 GB       | N/A        | 1 (no chunking) |
+| 720p  | 1280×720  | 6,364  | 24 GB (90%)    | 25.2 GB       | N/A        | 1 (no chunking) |
+| 1080p | 1920×1080 | 6,364  | 24 GB (90%)    | 56.6 GB       | 4,580      | 2      |
+| 4K    | 3840×2160 | 6,364  | 24 GB (90%)    | 226 GB        | 1,142      | 6      |
+
+**Key Difference**: GPU can process larger chunks because:
+- Higher memory usage percentage (90% vs 33%)
+- Dedicated memory (not shared with OS)
+- Better for high-resolution video processing
 
 **Chunking Algorithm:**
-1. Calculate memory needed for entire video
-2. Compare with available RAM/VRAM (based on usage percentage)
-3. If insufficient, calculate optimal chunk size
-4. Process chunks with overlap (default: 1 frame)
-5. Merge results intelligently (skip overlap frames)
-6. Clean up temporary files automatically
+1. Calculate memory needed for entire video (based on **actual resolution**)
+2. Apply 1.5× safety multiplier for headroom
+3. Compare with available memory (RAM or VRAM based on device)
+4. Use device-appropriate usage percentage (33% CPU, 90% GPU)
+5. If insufficient, calculate optimal chunk size
+6. Process chunks with overlap (default: 1 frame)
+7. Merge results intelligently (skip overlap frames)
+8. Clean up temporary files automatically
+
+**Key Point**: Chunk size depends on **video resolution** AND **device type**!
 
 ### Memory Optimization Tips
 

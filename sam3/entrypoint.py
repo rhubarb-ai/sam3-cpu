@@ -40,6 +40,7 @@ from sam3.__globals import (
     TEMP_DIR,
     DEFAULT_OUTPUT_DIR,
     RAM_USAGE_PERCENT,
+    VRAM_USAGE_PERCENT,
     MEMORY_SAFETY_MULTIPLIER,
     CPU_MEMORY_RESERVE_PERCENT,
     GPU_MEMORY_RESERVE_PERCENT,
@@ -156,6 +157,7 @@ class Sam3Entrypoint:
         bpe_path: Optional[str] = None,
         num_workers: Optional[int] = None,
         ram_usage_percent: float = None,
+        vram_usage_percent: float = None,
         min_video_frames: int = None,
         min_chunk_overlap: int = None,
         temp_dir: str = None,
@@ -168,7 +170,8 @@ class Sam3Entrypoint:
         Args:
             bpe_path: Path to BPE tokenizer file. Defaults to global BPE_PATH.
             num_workers: Number of worker threads (CPU) or GPUs to use. Auto-detects if None.
-            ram_usage_percent: Fraction of available RAM to use for chunking (default: 0.25).
+            ram_usage_percent: Fraction of available RAM to use for CPU chunking (default: 0.33).
+            vram_usage_percent: Fraction of available VRAM to use for GPU chunking (default: 0.90).
             min_video_frames: Minimum frames per chunk (default: from __globals).
             min_chunk_overlap: Minimum frame overlap between chunks (default: from __globals).
             temp_dir: Temporary directory for intermediate files (default: from __globals).
@@ -178,6 +181,7 @@ class Sam3Entrypoint:
         self.bpe_path = bpe_path or BPE_PATH
         self.num_workers = num_workers or DEFAULT_NUM_WORKERS
         self.ram_usage_percent = ram_usage_percent if ram_usage_percent is not None else RAM_USAGE_PERCENT
+        self.vram_usage_percent = vram_usage_percent if vram_usage_percent is not None else VRAM_USAGE_PERCENT
         self.min_video_frames = min_video_frames if min_video_frames is not None else DEFAULT_MIN_VIDEO_FRAMES
         self.min_chunk_overlap = min_chunk_overlap if min_chunk_overlap is not None else DEFAULT_MIN_CHUNK_OVERLAP
         self.temp_dir = Path(temp_dir) if temp_dir else Path(TEMP_DIR)
@@ -322,6 +326,18 @@ class Sam3Entrypoint:
                     utilization_percent=50.0
                 )
     
+    @property
+    def memory_usage_percent(self) -> float:
+        """Get the appropriate memory usage percentage based on device type.
+        
+        Returns:
+            RAM usage percent for CPU, VRAM usage percent for GPU
+        """
+        if self.memory_info.device_type == "cuda":
+            return self.vram_usage_percent
+        else:
+            return self.ram_usage_percent
+    
     def _calculate_memory_needed(
         self, 
         width: int, 
@@ -331,15 +347,14 @@ class Sam3Entrypoint:
     ) -> float:
         """Calculate memory needed in GB for processing.
         
-        Note: Model resizes inputs to 1008x1008 and stores as float32 (4 bytes per channel),
-        not the original video dimensions.
+        Note: We calculate based on ACTUAL video resolution, not model size (1008x1008).
+        Even though SAM3 resizes to 1008x1008, the memory footprint during loading
+        is determined by the original resolution frames being decoded and processed.
         """
-        # Model input size (SAM3 uses 1008x1008)
-        model_size = 1008
-        
-        # Calculate frame data size (RGB, 3 channels, 4 bytes per channel for float32)
-        # Model resizes all inputs to model_size x model_size
-        bytes_per_frame = model_size * model_size * 3 * 4  # float32 = 4 bytes
+        # Use actual video resolution (not model size)
+        # Video frames are decoded at original resolution before being resized
+        # Memory estimate: RGB, 3 channels, 3 bytes per channel for uint8 (video decoding)
+        bytes_per_frame = width * height * 3  # uint8 = 1 byte per channel
         
         # Total frame data in GB
         frame_data_gb = (bytes_per_frame * num_frames) / (1024**3)
@@ -355,8 +370,8 @@ class Sam3Entrypoint:
         
         if self.verbose:
             logger.debug(f"Memory calculation:")
-            logger.debug(f"  Original resolution: {width}x{height}")
-            logger.debug(f"  Model input size: {model_size}x{model_size} (float32)")
+            logger.debug(f"  Video resolution: {width}x{height}")
+            logger.debug(f"  Bytes per frame: {bytes_per_frame / 1024**2:.2f} MB (uint8 RGB)")
             logger.debug(f"  Frame data: {frame_data_gb:.2f} GB ({num_frames} frames)")
             logger.debug(f"  Inference overhead: {inference_overhead_gb:.2f} GB")
             logger.debug(f"  Total needed: {total_memory_gb:.2f} GB")
@@ -439,8 +454,8 @@ class Sam3Entrypoint:
                 requires_chunking = True
                 
                 # Calculate chunk size based on available memory
-                # Use ram_usage_percent of available memory
-                usable_memory_gb = self.memory_info.available_gb * self.ram_usage_percent
+                # Use appropriate memory usage percent based on device (RAM for CPU, VRAM for GPU)
+                usable_memory_gb = self.memory_info.available_gb * self.memory_usage_percent
                 
                 # Subtract inference overhead
                 inference_overhead_gb = VIDEO_INFERENCE_MB / 1024
@@ -467,10 +482,7 @@ class Sam3Entrypoint:
                 )
                 
                 if self.verbose:
-                    logger.info(f"📊 Chunking required for video")
-                    logger.info(f"  Total frames: {total_frames}")
-                    logger.info(f"  Chunk size: ~{chunk_size} frames")
-                    logger.info(f"  Number of chunks: {num_chunks}")
+                    logger.info(f"📊 Chunking will be required (detailed info shown during processing)")
             else:
                 # Image too large and no chunking option
                 can_process = False
@@ -601,8 +613,8 @@ class Sam3Entrypoint:
     
     def _calculate_chunk_size(self, video_meta: VideoMetadata) -> int:
         """Calculate optimal chunk size based on available memory."""
-        # Use ram_usage_percent of available memory
-        usable_memory_gb = self.memory_info.available_gb * self.ram_usage_percent
+        # Use appropriate memory usage percent based on device (RAM for CPU, VRAM for GPU)
+        usable_memory_gb = self.memory_info.available_gb * self.memory_usage_percent
         
         # Subtract inference overhead
         inference_overhead_gb = VIDEO_INFERENCE_MB / 1024
@@ -699,15 +711,19 @@ class Sam3Entrypoint:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
             # Use ffmpeg to extract chunk by time
-            # -ss: start time, -t: duration, -c copy: stream copy (fast, no re-encoding)
+            # Note: Using re-encoding (-c:v libx264) for precise frame boundaries
+            # -c copy would be faster but can only cut at keyframes, causing frame count mismatches
             cmd = [
                 'ffmpeg',
                 '-loglevel', 'error',  # Only show errors
                 '-y',  # Overwrite output file
+                '-ss', str(chunk_info.start_time_sec),  # Start time (before -i for speed)
                 '-i', video_path,
-                '-ss', str(chunk_info.start_time_sec),
-                '-t', str(chunk_info.duration_sec),
-                '-c', 'copy',  # Stream copy for speed
+                '-t', str(chunk_info.duration_sec),  # Duration
+                '-c:v', 'libx264',  # Re-encode for precise cuts
+                '-crf', '23',  # Quality (23 is default)
+                '-preset', 'veryfast',  # Speed up encoding
+                '-c:a', 'copy',  # Copy audio (if any)
                 output_path
             ]
             
@@ -1181,7 +1197,25 @@ class Sam3Entrypoint:
                 )
                 
                 if self.verbose:
-                    logger.info(f"Chunking enabled: {len(chunks)} chunks, chunk_size={chunk_size}, overlap={self.min_chunk_overlap}")
+                    stride = chunk_size - self.min_chunk_overlap
+                    device_type = "VRAM" if self.memory_info.device_type == "cuda" else "RAM"
+                    usage_percent = self.memory_usage_percent * 100
+                    
+                    logger.info("=" * 60)
+                    logger.info("📊 Video Chunking Details")
+                    logger.info("=" * 60)
+                    logger.info(f"Video: {video_name}")
+                    logger.info(f"Resolution: {video_meta.width}x{video_meta.height}")
+                    logger.info(f"FPS: {video_meta.fps:.2f}")
+                    logger.info(f"Total Frames: {video_meta.total_frames}")
+                    logger.info(f"Available {device_type}: {self.memory_info.available_gb:.2f} GB")
+                    logger.info(f"Memory Needed: {memory_needed:.2f} GB")
+                    logger.info(f"{device_type} Usage Percent: {usage_percent:.0f}%")
+                    logger.info(f"{device_type}-safe Frames per Chunk: {chunk_size}")
+                    logger.info(f"Overlap: {self.min_chunk_overlap} frame(s)")
+                    logger.info(f"Stride: {stride} frames")
+                    logger.info(f"Number of Chunks: {len(chunks)}")
+                    logger.info("=" * 60)
                 
                 # Process in chunks
                 results = self._process_video_in_chunks(
@@ -2211,7 +2245,12 @@ class Sam3Entrypoint:
         logger.info("=" * 60)
         logger.info(f"Device: {DEVICE.type.upper()}")
         logger.info(f"Memory Available: {self.memory_info.available_gb:.2f} GB")
-        logger.info(f"RAM Usage %: {self.ram_usage_percent * 100:.0f}%")
+        
+        if self.memory_info.device_type == "cuda":
+            logger.info(f"VRAM Usage %: {self.vram_usage_percent * 100:.0f}%")
+        else:
+            logger.info(f"RAM Usage %: {self.ram_usage_percent * 100:.0f}%")
+        
         logger.info(f"Min Video Frames: {self.min_video_frames}")
         logger.info(f"Min Chunk Overlap: {self.min_chunk_overlap}")
         logger.info(f"Temp Dir: {self.temp_dir}")

@@ -31,8 +31,12 @@ DEFAULT_MIN_CHUNK_OVERLAP = 1
 # Memory management
 IMAGE_INFERENCE_MB = 6760
 VIDEO_INFERENCE_MB = 6900
-RAM_USAGE_PERCENT = 0.25  # Use 25% of available RAM for video chunking
-MEMORY_SAFETY_MULTIPLIER = 3  # Require 3x estimated memory for safety
+
+# Memory usage for chunking (percentage of available memory to use)
+RAM_USAGE_PERCENT = 0.33   # Use 33% of available RAM for CPU video chunking (conservative)
+VRAM_USAGE_PERCENT = 0.90  # Use 90% of available VRAM for GPU video chunking (aggressive, GPU memory is dedicated)
+
+MEMORY_SAFETY_MULTIPLIER = 1.5  # Require 1.5x estimated memory for safety (reduced from 3x)
 CPU_MEMORY_RESERVE_PERCENT = 0.3  # Reserve 30% for OS
 GPU_MEMORY_RESERVE_PERCENT = 0.05  # Reserve 5% for display
 
