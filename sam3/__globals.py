@@ -55,6 +55,9 @@ DEFAULT_PROPAGATION_DIRECTION = "both"
 DEFAULT_NUM_WORKERS = 1
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 
+# Post-processing settings
+CHUNK_MASK_MATCHING_IOU_THRESHOLD = 0.6  # IoU threshold for matching masks across chunks (60% - based on empirical testing showing 0.6-0.8 range)
+
 # Directory settings
 TEMP_DIR = "/tmp/sam3-cpu" if DEVICE.type == "cpu" else "/tmp/sam3-gpu"
 os.makedirs(TEMP_DIR, exist_ok=True)
