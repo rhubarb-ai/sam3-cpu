@@ -48,7 +48,7 @@ from sam3.__globals import (
     DEFAULT_NUM_WORKERS
 )
 from sam3.logger import get_logger
-from sam3.driver import Sam3ImageDriver, Sam3VideoDriver
+from sam3.drivers import Sam3ImageDriver, Sam3VideoDriver
 
 logger = get_logger(__name__)
 
@@ -1245,8 +1245,8 @@ class Sam3Entrypoint:
                             logger.info(f"  Prompt '{prompt}' detected {num_objs} object(s)")
                     
                     # Propagate
-                    results = driver.propagate_in_video(
-                        session_id, propogation_direction=propagation_direction
+                    results, _, _ = driver.propagate_in_video(
+                        session_id, propagation_direction=propagation_direction
                     )
                     
                     if self.verbose:
@@ -1403,10 +1403,10 @@ class Sam3Entrypoint:
                 )
                 
                 # Propagate
-                results = driver.propagate_in_video(
+                results, _, _ = driver.propagate_in_video(
                     session_id,
                     start_frame_idx=frame_idx,
-                    propogation_direction=propagation_direction
+                    propagation_direction=propagation_direction
                 )
             finally:
                 driver.close_session(session_id)
@@ -1520,10 +1520,10 @@ class Sam3Entrypoint:
                 )
                 
                 # Re-propagate with refined prompts
-                results = driver.propagate_in_video(
+                results, _, _ = driver.propagate_in_video(
                     session_id,
                     start_frame_idx=frame_idx,
-                    propogation_direction=propagation_direction
+                    propagation_direction=propagation_direction
                 )
             finally:
                 driver.close_session(session_id)
@@ -1749,10 +1749,10 @@ class Sam3Entrypoint:
                     
                     # Propagate within segment bounds
                     # Note: This processes entire video; ideally we'd limit to segment range
-                    results = driver.propagate_in_video(
+                    results, _, _ = driver.propagate_in_video(
                         session_id,
                         start_frame_idx=start_frame,
-                        propogation_direction="forward"
+                        propagation_direction="forward"
                     )
                     
                     # Filter results to segment range
@@ -1882,9 +1882,9 @@ class Sam3Entrypoint:
                 )
             
             # Propagate across chunk
-            chunk_results = driver.propagate_in_video(
+            chunk_results, _, _ = driver.propagate_in_video(
                 session_id=session_id,
-                propogation_direction=propagation_direction
+                propagation_direction=propagation_direction
             )
             
             # Convert chunk-local frame indices to global frame indices

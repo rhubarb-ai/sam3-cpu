@@ -5,11 +5,11 @@ import json
 import os
 import psutil
 from datetime import datetime
+from sam3.__globals import PROFILE_OUTPUT_JSON, PROFILE_OUTPUT_TXT
 
 PROFILE_RESULTS = []
 
-def profile(output_json="profile_results.json",
-            output_txt="profile_results.txt"):
+def profile(output_json=PROFILE_OUTPUT_JSON, output_txt=PROFILE_OUTPUT_TXT):
     """Profile decorator with global enable/disable control via sam3.__globals.ENABLE_PROFILING"""
 
     def decorator(func):
@@ -50,13 +50,16 @@ def profile(output_json="profile_results.json",
 
             PROFILE_RESULTS.append(profile_data)
 
-            with open(output_json, "w") as f:
-                json.dump(PROFILE_RESULTS, f, indent=4)
+            # Save results to JSON and TXT
+            if output_json is not None:
+                with open(output_json, "w") as f:
+                    json.dump(PROFILE_RESULTS, f, indent=4)
 
-            with open(output_txt, "w") as f:
-                for entry in PROFILE_RESULTS:
-                    f.write(
-                        f"{entry['function_name']} | "
+            if output_txt is not None:
+                with open(output_txt, "w") as f:
+                    for entry in PROFILE_RESULTS:
+                        f.write(
+                            f"{entry['function_name']} | "
                         f"Time: {entry['execution_time_seconds']} s | "
                         f"Memory Used: {entry['memory_used_MB']} MB | "
                         f"Total Memory: {entry['total_process_memory_MB']} MB\n"
@@ -72,8 +75,7 @@ def profile(output_json="profile_results.json",
 
     return decorator
 
-def profile_v1(output_json="profile_results.json",
-            output_txt="profile_results.txt"):
+def profile_v1(output_json=PROFILE_OUTPUT_JSON, output_txt=PROFILE_OUTPUT_TXT):
     """
     Decorator to measure execution time and memory usage.
     Saves results to JSON and TXT.
@@ -121,20 +123,22 @@ def profile_v1(output_json="profile_results.json",
             PROFILE_RESULTS.append(profile_data)
 
             # Save JSON
-            with open(output_json, "w") as f:
-                json.dump(PROFILE_RESULTS, f, indent=4)
+            if output_json is not None:
+                with open(output_json, "w") as f:
+                    json.dump(PROFILE_RESULTS, f, indent=4)
 
             # Save TXT
-            with open(output_txt, "w") as f:
-                for entry in PROFILE_RESULTS:
-                    f.write(
-                        f"Function: {entry['function_name']}\n"
-                        f"Timestamp: {entry['timestamp']}\n"
-                        f"Execution Time (s): {entry['execution_time_seconds']}\n"
-                        f"Current Memory (MB): {entry['memory_current_MB']}\n"
-                        f"Peak Memory (MB): {entry['memory_peak_MB']}\n"
-                        f"{'-'*40}\n"
-                    )
+            if output_txt is not None:
+                with open(output_txt, "w") as f:
+                    for entry in PROFILE_RESULTS:
+                        f.write(
+                            f"Function: {entry['function_name']}\n"
+                            f"Timestamp: {entry['timestamp']}\n"
+                            f"Execution Time (s): {entry['execution_time_seconds']}\n"
+                            f"Current Memory (MB): {entry['memory_current_MB']}\n"
+                            f"Peak Memory (MB): {entry['memory_peak_MB']}\n"
+                            f"{'-'*40}\n"
+                        )
 
             print(f"[PROFILED] {func.__name__} | "
                   f"Time: {execution_time:.6f}s | "

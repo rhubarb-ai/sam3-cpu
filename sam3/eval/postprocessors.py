@@ -155,7 +155,7 @@ class PostProcessImage(nn.Module):
             return None
         if self.always_interpolate_masks_on_gpu:
             gpu_device = target_sizes.device
-            assert gpu_device.type == "cuda"
+            # assert gpu_device.type == "cuda"
             pred_masks = pred_masks.to(device=gpu_device)
         if consistent:
             assert keep is None, "TODO: implement?"

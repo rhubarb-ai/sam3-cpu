@@ -2,9 +2,12 @@ import torch
 import os
 import sys
 import sam3
-from sam3.logger import get_logger
+from sam3.logger import get_logger, LOG_LEVELS
 
-logger = get_logger(__name__)
+os.environ["OPENCV_FFMPEG_READ_ATTEMPTS"] = "10000"
+
+LOG_LEVEL = LOG_LEVELS["DEBUG"]
+logger = get_logger(__name__, level=LOG_LEVEL)
 
 logger.info(f"Python executable: {sys.executable}")
 logger.info(f"CUDA available: {torch.cuda.is_available()}")
@@ -28,13 +31,17 @@ BPE_PATH = os.path.join(SAM3_ROOT, "assets/bpe_simple_vocab_16e6.txt.gz")
 DEFAULT_MIN_VIDEO_FRAMES = 15
 DEFAULT_MIN_CHUNK_OVERLAP = 1
 
+SUPPORTED_VIDEO_FORMATS = ('.mp4', '.avi', '.mov', '.mkv')
+
 # Memory management
 IMAGE_INFERENCE_MB = 6760
 VIDEO_INFERENCE_MB = 6900
+TENSOR_SIZE_BYTES = 1008*1008*3*4 # Approximate size of a 1008x1008 RGB tensor in bytes
 
 # Memory usage for chunking (percentage of available memory to use)
-RAM_USAGE_PERCENT = 0.33   # Use 33% of available RAM for CPU video chunking (conservative)
-VRAM_USAGE_PERCENT = 0.90  # Use 90% of available VRAM for GPU video chunking (aggressive, GPU memory is dedicated)
+RAM_USAGE_PERCENT = 0.01   # Use 5% of available RAM for CPU video chunking (conservative)
+# RAM_USAGE_PERCENT = 0.65   # Use 65% of available RAM for CPU video chunking (conservative)
+VRAM_USAGE_PERCENT = 0.65  # Use 65% of available VRAM for GPU video chunking (aggressive, GPU memory is dedicated)
 
 MEMORY_SAFETY_MULTIPLIER = 1.5  # Require 1.5x estimated memory for safety (reduced from 3x)
 CPU_MEMORY_RESERVE_PERCENT = 0.3  # Reserve 30% for OS
@@ -54,3 +61,6 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 DEFAULT_OUTPUT_DIR = os.path.join("./results")
 os.makedirs(DEFAULT_OUTPUT_DIR, exist_ok=True)
+
+PROFILE_OUTPUT_JSON = "profile_results.json"
+PROFILE_OUTPUT_TXT = "profile_results.txt"

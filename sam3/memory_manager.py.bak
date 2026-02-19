@@ -1,0 +1,544 @@
+"""
+SAM3 Memory Manager Module
+
+Extracted from entrypoint.py to modularise memory/device checking and video
+chunking logic.  This module provides a class-based API to:
+
+  * Detect CPU / GPU availability and current memory capacity.
+  * Decide whether an image or video can be processed with available memory.
+  * Compute an optimal chunking strategy when VRAM / RAM is limited.
+  * Generate user-facing warnings when memory is insufficient.
+
+The module relies on constants defined in ``__globals.py`` and is intended to
+be used as a wrapper / helper by the higher-level entrypoint and upload-handler
+code.
+
+Typical usage::
+
+    from sam3.memory_manager import MemoryManager
+
+    memory_mgr = MemoryManager()
+
+    # --- Image ---
+    if not memory_mgr.can_process_image(height, width):
+        warning = memory_mgr.warn_if_insufficient_memory(height, width)
+        # show warning / ask user if they want to proceed
+
+    # --- Video ---
+    if not memory_mgr.can_process_video(n_frames, height, width):
+        strategy = memory_mgr.suggest_video_chunks(n_frames, height, width)
+        # adjust pipeline to process in chunks
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+import torch
+
+from sam3.__globals import (
+    DEVICE,
+    IMAGE_INFERENCE_MB,
+    VIDEO_INFERENCE_MB,
+    RAM_USAGE_PERCENT,
+    VRAM_USAGE_PERCENT,
+    MEMORY_SAFETY_MULTIPLIER,
+    CPU_MEMORY_RESERVE_PERCENT,
+    GPU_MEMORY_RESERVE_PERCENT,
+    DEFAULT_MIN_VIDEO_FRAMES,
+    DEFAULT_MIN_CHUNK_OVERLAP,
+)
+from sam3.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+# ============================================================================
+# Data Classes
+# ============================================================================
+
+@dataclass
+class MemoryInfo:
+    """Snapshot of current memory / VRAM capacity."""
+
+    device_type: str          # "cpu" or "cuda"
+    total_gb: float
+    available_gb: float
+    utilization_percent: float
+
+
+@dataclass
+class FeasibilityResult:
+    """Outcome of a memory feasibility check."""
+
+    can_process: bool
+    memory_needed_gb: float
+    memory_available_gb: float
+    requires_chunking: bool
+    chunk_size: Optional[int] = None
+    num_chunks: Optional[int] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ChunkingStrategy:
+    """Describes how a video should be split into chunks."""
+
+    chunk_size: int            # frames per chunk
+    num_chunks: int
+    overlap: int               # frame overlap between consecutive chunks
+    stride: int                # effective new frames per chunk (chunk_size - overlap)
+    total_frames: int
+    memory_per_chunk_gb: float
+
+
+# ============================================================================
+# MemoryManager
+# ============================================================================
+
+class MemoryManager:
+    """Centralised memory / device helper for SAM3.
+
+    Parameters
+    ----------
+    ram_usage_percent : float, optional
+        Fraction of available RAM to budget for CPU processing (default from
+        ``__globals.RAM_USAGE_PERCENT``).
+    vram_usage_percent : float, optional
+        Fraction of available VRAM to budget for GPU processing (default from
+        ``__globals.VRAM_USAGE_PERCENT``).
+    min_video_frames : int, optional
+        Hard lower-bound on the number of frames in a single chunk.
+    min_chunk_overlap : int, optional
+        Minimum frame overlap between consecutive chunks.
+    verbose : bool
+        Emit detailed log messages.
+    """
+
+    def __init__(
+        self,
+        ram_usage_percent: Optional[float] = None,
+        vram_usage_percent: Optional[float] = None,
+        min_video_frames: Optional[int] = None,
+        min_chunk_overlap: Optional[int] = None,
+        verbose: bool = True,
+    ):
+        self.ram_usage_percent = ram_usage_percent if ram_usage_percent is not None else RAM_USAGE_PERCENT
+        self.vram_usage_percent = vram_usage_percent if vram_usage_percent is not None else VRAM_USAGE_PERCENT
+        self.min_video_frames = min_video_frames if min_video_frames is not None else DEFAULT_MIN_VIDEO_FRAMES
+        self.min_chunk_overlap = min_chunk_overlap if min_chunk_overlap is not None else DEFAULT_MIN_CHUNK_OVERLAP
+        self.verbose = verbose
+
+        # Detect memory on construction
+        self.memory_info: MemoryInfo = self._detect_memory()
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+
+    def refresh(self) -> MemoryInfo:
+        """Re-read current memory and return the updated ``MemoryInfo``."""
+        self.memory_info = self._detect_memory()
+        return self.memory_info
+
+    @property
+    def device_type(self) -> str:
+        """``'cpu'`` or ``'cuda'``."""
+        return self.memory_info.device_type
+
+    @property
+    def memory_usage_percent(self) -> float:
+        """Return the budget fraction appropriate for the current device."""
+        if self.memory_info.device_type == "cuda":
+            return self.vram_usage_percent
+        return self.ram_usage_percent
+
+    # ------------------------------------------------------------------
+    # Image feasibility
+    # ------------------------------------------------------------------
+
+    def can_process_image(
+        self,
+        height: int,
+        width: int,
+        channels: int = 3,
+    ) -> bool:
+        """Return ``True`` if the image fits within the current memory budget.
+
+        This is a convenience wrapper around :meth:`check_image_feasibility`
+        that simply returns the boolean result.
+        """
+        result = self.check_image_feasibility(height, width, channels)
+        return result.can_process
+
+    def check_image_feasibility(
+        self,
+        height: int,
+        width: int,
+        channels: int = 3,
+    ) -> FeasibilityResult:
+        """Full feasibility check for an image, including warnings."""
+        memory_needed = self._estimate_memory(width, height, num_frames=1, is_video=False, channels=channels)
+        return self._check_feasibility(memory_needed, total_frames=1, is_video=False)
+
+    def warn_if_insufficient_memory_for_image(
+        self,
+        height: int,
+        width: int,
+        channels: int = 3,
+    ) -> Optional[str]:
+        """Return a human-readable warning string, or ``None`` if OK."""
+        result = self.check_image_feasibility(height, width, channels)
+        if result.can_process:
+            return None
+        return "\n".join(result.warnings)
+
+    # ------------------------------------------------------------------
+    # Video feasibility
+    # ------------------------------------------------------------------
+
+    def can_process_video(
+        self,
+        num_frames: int,
+        frame_height: int,
+        frame_width: int,
+        channels: int = 3,
+    ) -> bool:
+        """Return ``True`` if the full video fits in memory without chunking."""
+        result = self.check_video_feasibility(num_frames, frame_height, frame_width, channels)
+        return result.can_process and not result.requires_chunking
+
+    def check_video_feasibility(
+        self,
+        num_frames: int,
+        frame_height: int,
+        frame_width: int,
+        channels: int = 3,
+    ) -> FeasibilityResult:
+        """Full feasibility check for a video, including chunking decision."""
+        memory_needed = self._estimate_memory(frame_width, frame_height, num_frames, is_video=True, channels=channels)
+        return self._check_feasibility(memory_needed, total_frames=num_frames, is_video=True)
+
+    def suggest_video_chunks(
+        self,
+        num_frames: int,
+        frame_height: int,
+        frame_width: int,
+        channels: int = 3,
+        bytes_per_frame: Optional[int] = None,
+    ) -> ChunkingStrategy:
+        """Compute a chunking strategy based on current memory constraints.
+
+        Parameters
+        ----------
+        num_frames : int
+            Total video frames.
+        frame_height, frame_width : int
+            Spatial resolution.
+        channels : int
+            Colour channels (default 3 – RGB).
+        bytes_per_frame : int, optional
+            Override the per-frame byte estimate (e.g. from ``VideoMetadata``).
+
+        Returns
+        -------
+        ChunkingStrategy
+        """
+        if bytes_per_frame is None:
+            bytes_per_frame = frame_width * frame_height * channels  # uint8 RGB
+
+        # Usable memory for frames, after subtracting inference overhead
+        usable_memory_gb = self.memory_info.available_gb * self.memory_usage_percent
+        inference_overhead_gb = VIDEO_INFERENCE_MB / 1024
+        memory_for_frames_gb = max(0.1, usable_memory_gb - inference_overhead_gb)
+        memory_for_frames_bytes = memory_for_frames_gb * (1024 ** 3)
+
+        max_frames = int(memory_for_frames_bytes / bytes_per_frame) if bytes_per_frame > 0 else self.min_video_frames
+        chunk_size = max(self.min_video_frames, max_frames)
+
+        overlap = self.min_chunk_overlap
+        stride = chunk_size - overlap
+        if stride <= 0:
+            # Overlap must be strictly smaller than chunk_size
+            overlap = max(0, chunk_size - 1)
+            stride = max(1, chunk_size - overlap)
+
+        num_chunks = max(1, math.ceil((num_frames - overlap) / stride))
+
+        # Memory consumed by one chunk (frames + inference)
+        memory_per_chunk_gb = (bytes_per_frame * chunk_size) / (1024 ** 3) + inference_overhead_gb
+
+        strategy = ChunkingStrategy(
+            chunk_size=chunk_size,
+            num_chunks=num_chunks,
+            overlap=overlap,
+            stride=stride,
+            total_frames=num_frames,
+            memory_per_chunk_gb=memory_per_chunk_gb,
+        )
+
+        if self.verbose:
+            logger.info(f"Chunking strategy: {num_chunks} chunks of ~{chunk_size} frames "
+                        f"(overlap={overlap}, stride={stride})")
+            logger.info(f"  Usable memory: {usable_memory_gb:.2f} GB")
+            logger.info(f"  Memory for frames: {memory_for_frames_gb:.2f} GB")
+            logger.info(f"  Est. memory per chunk: {memory_per_chunk_gb:.2f} GB")
+
+        return strategy
+
+    # ------------------------------------------------------------------
+    # User-facing prompt helper
+    # ------------------------------------------------------------------
+
+    def prompt_user_for_memory(self, feasibility: FeasibilityResult) -> bool:
+        """Interactive prompt asking the user to free memory or continue.
+
+        Returns ``True`` if the user chooses to proceed, ``False`` otherwise.
+        Automatically returns ``True`` when chunking will handle the issue.
+        """
+        print("\n" + "=" * 70)
+        print("MEMORY INSUFFICIENT WARNING")
+        print("=" * 70)
+
+        for warning in feasibility.warnings:
+            print(f"⚠  {warning}")
+
+        print(f"\nMemory Status:")
+        print(f"  Required (with {MEMORY_SAFETY_MULTIPLIER}x safety):  "
+              f"{feasibility.memory_needed_gb * MEMORY_SAFETY_MULTIPLIER:.2f} GB")
+        print(f"  Currently available:         {feasibility.memory_available_gb:.2f} GB")
+        print(f"  Device:                      {self.memory_info.device_type.upper()}")
+
+        if feasibility.requires_chunking:
+            print(f"\n✓ Video will be processed in {feasibility.num_chunks} chunks")
+            print(f"  (~{feasibility.chunk_size} frames per chunk)")
+            return True  # Auto-continue with chunking
+
+        print("\nRecommendation: Close other programs to free up memory, then try again.")
+        print("=" * 70)
+
+        while True:
+            response = input("\nDo you want to continue anyway? (y/n): ").strip().lower()
+            if response in ("y", "yes"):
+                logger.warning("User chose to continue despite insufficient memory")
+                return True
+            if response in ("n", "no"):
+                logger.info("User chose not to continue due to insufficient memory")
+                return False
+            print("Please enter 'y' for yes or 'n' for no.")
+
+    # ------------------------------------------------------------------
+    # Internal: memory detection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_memory() -> MemoryInfo:
+        """Return a ``MemoryInfo`` snapshot for the active device."""
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            total_memory = props.total_memory / (1024 ** 3)
+            reserved = torch.cuda.memory_reserved(0) / (1024 ** 3)
+            available_memory = total_memory - reserved
+            utilization = (reserved / total_memory) * 100 if total_memory else 0.0
+
+            return MemoryInfo(
+                device_type="cuda",
+                total_gb=total_memory,
+                available_gb=available_memory,
+                utilization_percent=utilization,
+            )
+
+        # CPU / RAM (Linux)
+        try:
+            with open("/proc/meminfo", "r") as fh:
+                lines = fh.readlines()
+
+            mem_info: dict[str, int] = {}
+            for line in lines:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    key = parts[0].strip()
+                    value = int(parts[1].strip().split()[0])  # KB
+                    mem_info[key] = value
+
+            mem_total = mem_info["MemTotal"] / (1024 ** 2)       # KB → GB
+            mem_available = mem_info["MemAvailable"] / (1024 ** 2)
+            utilization = ((mem_total - mem_available) / mem_total) * 100
+
+            return MemoryInfo(
+                device_type="cpu",
+                total_gb=mem_total,
+                available_gb=mem_available,
+                utilization_percent=utilization,
+            )
+        except (FileNotFoundError, KeyError, IndexError) as exc:
+            logger.warning(f"Could not read /proc/meminfo: {exc}. Using fallback values.")
+            return MemoryInfo(
+                device_type="cpu",
+                total_gb=8.0,
+                available_gb=4.0,
+                utilization_percent=50.0,
+            )
+
+    # ------------------------------------------------------------------
+    # Internal: memory estimation
+    # ------------------------------------------------------------------
+
+    def _estimate_memory(
+        self,
+        width: int,
+        height: int,
+        num_frames: int = 1,
+        is_video: bool = False,
+        channels: int = 3,
+    ) -> float:
+        """Estimate the memory (GB) needed to process an image or video.
+
+        The estimate accounts for raw frame data **at the original resolution**
+        plus the fixed model-inference overhead.
+        """
+        bytes_per_frame = width * height * channels  # uint8 = 1 byte/channel
+        frame_data_gb = (bytes_per_frame * num_frames) / (1024 ** 3)
+
+        if is_video:
+            inference_overhead_gb = VIDEO_INFERENCE_MB / 1024
+        else:
+            inference_overhead_gb = IMAGE_INFERENCE_MB / 1024
+
+        total_memory_gb = frame_data_gb + inference_overhead_gb
+
+        if self.verbose:
+            logger.debug("Memory estimation:")
+            logger.debug(f"  Resolution: {width}x{height}")
+            logger.debug(f"  Bytes per frame: {bytes_per_frame / 1024**2:.2f} MB (uint8 RGB)")
+            logger.debug(f"  Frame data: {frame_data_gb:.2f} GB ({num_frames} frames)")
+            logger.debug(f"  Inference overhead: {inference_overhead_gb:.2f} GB")
+            logger.debug(f"  Total needed: {total_memory_gb:.2f} GB")
+
+        return total_memory_gb
+
+    # ------------------------------------------------------------------
+    # Internal: feasibility decision
+    # ------------------------------------------------------------------
+
+    def _check_feasibility(
+        self,
+        memory_needed_gb: float,
+        total_frames: int = 1,
+        is_video: bool = False,
+    ) -> FeasibilityResult:
+        """Core feasibility logic.
+
+        Decision tree:
+          1. ``required <= available`` → OK
+          2. ``required <= usable_total`` → user should free memory
+          3. **Video**: fall back to chunking
+          4. **Image**: cannot process
+        """
+        warnings: list[str] = []
+        required_memory_gb = memory_needed_gb * MEMORY_SAFETY_MULTIPLIER
+
+        enough_available = required_memory_gb <= self.memory_info.available_gb
+
+        if self.memory_info.device_type == "cuda":
+            usable_total_gb = self.memory_info.total_gb * (1 - GPU_MEMORY_RESERVE_PERCENT)
+        else:
+            usable_total_gb = self.memory_info.total_gb * (1 - CPU_MEMORY_RESERVE_PERCENT)
+
+        enough_total = required_memory_gb <= usable_total_gb
+
+        # -- Case 1: plenty of available memory --------------------------------
+        if enough_available:
+            if self.verbose:
+                logger.info(
+                    f"✓ Memory check passed: {required_memory_gb:.2f} GB needed, "
+                    f"{self.memory_info.available_gb:.2f} GB available"
+                )
+            return FeasibilityResult(
+                can_process=True,
+                memory_needed_gb=memory_needed_gb,
+                memory_available_gb=self.memory_info.available_gb,
+                requires_chunking=False,
+            )
+
+        # -- Case 2: total memory would suffice if freed -----------------------
+        if enough_total:
+            warnings.append(
+                f"Insufficient available memory: {required_memory_gb:.2f} GB needed, "
+                f"only {self.memory_info.available_gb:.2f} GB available."
+            )
+            warnings.append(
+                f"However, total usable memory ({usable_total_gb:.2f} GB) is sufficient. "
+                f"Please close other programs to free up memory."
+            )
+            if self.verbose:
+                logger.warning("⚠ Insufficient available memory")
+                logger.warning(f"  Required: {required_memory_gb:.2f} GB")
+                logger.warning(f"  Available: {self.memory_info.available_gb:.2f} GB")
+                logger.warning(f"  Total usable: {usable_total_gb:.2f} GB")
+
+            return FeasibilityResult(
+                can_process=False,
+                memory_needed_gb=memory_needed_gb,
+                memory_available_gb=self.memory_info.available_gb,
+                requires_chunking=False,
+                warnings=warnings,
+            )
+
+        # -- Case 3: not enough total memory -----------------------------------
+        if is_video:
+            # Chunking path
+            strategy = self.suggest_video_chunks(
+                num_frames=total_frames,
+                # We back-derive resolution from the memory estimate. The caller
+                # already calculated memory_needed_gb from real dims so the chunk
+                # strategy uses the same budget numbers.  We pass bytes_per_frame
+                # derived from the estimate.
+                frame_height=0,  # unused when bytes_per_frame is provided
+                frame_width=0,
+                bytes_per_frame=int((memory_needed_gb * (1024 ** 3)) / total_frames) if total_frames > 0 else 0,
+            )
+
+            warnings.append(
+                f"Video too large for available memory ({required_memory_gb:.2f} GB needed, "
+                f"{self.memory_info.available_gb:.2f} GB available)."
+            )
+            warnings.append(
+                f"Processing will use chunking strategy: {strategy.num_chunks} chunks "
+                f"of ~{strategy.chunk_size} frames each."
+            )
+
+            if self.verbose:
+                logger.info("📊 Chunking will be required (detailed info shown during processing)")
+
+            return FeasibilityResult(
+                can_process=True,
+                memory_needed_gb=memory_needed_gb,
+                memory_available_gb=self.memory_info.available_gb,
+                requires_chunking=True,
+                chunk_size=strategy.chunk_size,
+                num_chunks=strategy.num_chunks,
+                warnings=warnings,
+            )
+
+        # Image – nothing we can do
+        warnings.append(
+            f"Image too large to process: {required_memory_gb:.2f} GB needed, "
+            f"only {usable_total_gb:.2f} GB total usable memory."
+        )
+        warnings.append("Consider reducing image resolution.")
+
+        if self.verbose:
+            logger.error("✗ Image too large to process")
+            logger.error(f"  Required: {required_memory_gb:.2f} GB")
+            logger.error(f"  Usable total: {usable_total_gb:.2f} GB")
+
+        return FeasibilityResult(
+            can_process=False,
+            memory_needed_gb=memory_needed_gb,
+            memory_available_gb=self.memory_info.available_gb,
+            requires_chunking=False,
+            warnings=warnings,
+        )

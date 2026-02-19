@@ -211,3 +211,6 @@ profile_results.*
 video_segment/
 docs/local/
 results/
+rough/
+assets/videos/private/
+assets/images/private

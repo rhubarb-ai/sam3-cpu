@@ -6,6 +6,7 @@ from .model_builder import build_sam3_image_model
 from .entrypoint import Sam3Entrypoint
 from .wrapper import Sam3Wrapper
 from .model.sam3_video_predictor import Sam3VideoPredictor
+from .memory_manager import MemoryManager
 
 # Expose Sam3Entrypoint as Sam3 for convenience
 Sam3 = Sam3Entrypoint
@@ -18,4 +19,5 @@ __all__ = [
     "Sam3",
     "Sam3Wrapper",
     "Sam3VideoPredictor",
+    "MemoryManager",
 ]
