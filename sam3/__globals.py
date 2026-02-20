@@ -29,7 +29,7 @@ BPE_PATH = os.path.join(SAM3_ROOT, "assets/bpe_simple_vocab_16e6.txt.gz")
 
 # Video processing defaults
 DEFAULT_MIN_VIDEO_FRAMES = 15
-DEFAULT_MIN_CHUNK_OVERLAP = 1
+DEFAULT_MIN_CHUNK_OVERLAP = 5
 
 SUPPORTED_VIDEO_FORMATS = ('.mp4', '.avi', '.mov', '.mkv')
 
@@ -52,11 +52,11 @@ PARALLEL_CHUNK_THRESHOLD = 0.90  # Start loading next chunk at 90% completion
 
 # Output settings
 DEFAULT_PROPAGATION_DIRECTION = "both"
-DEFAULT_NUM_WORKERS = 1
+DEFAULT_NUM_WORKERS = 1  # Use all available CPU cores by default
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 
 # Post-processing settings
-CHUNK_MASK_MATCHING_IOU_THRESHOLD = 0.6  # IoU threshold for matching masks across chunks (60% - based on empirical testing showing 0.6-0.8 range)
+CHUNK_MASK_MATCHING_IOU_THRESHOLD = 0.75  # IoU threshold for matching masks across chunks (75% - expecting high values with lossless PNG storage)
 
 # Directory settings
 TEMP_DIR = "/tmp/sam3-cpu" if DEVICE.type == "cpu" else "/tmp/sam3-gpu"

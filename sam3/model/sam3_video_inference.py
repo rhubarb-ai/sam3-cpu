@@ -627,7 +627,7 @@ class Sam3VideoInference(Sam3VideoBase):
             torch.compile(
                 self.detector.transformer.decoder.forward,
                 fullgraph=True,
-                mode="max-autotune",
+                mode="max-autotune-no-cudagraphs",
                 dynamic=False,
             )
         )
@@ -636,7 +636,7 @@ class Sam3VideoInference(Sam3VideoBase):
             torch.compile(
                 self.detector.segmentation_head.forward,
                 fullgraph=True,
-                mode="max-autotune",
+                mode="max-autotune-no-cudagraphs",
             )
         )
 

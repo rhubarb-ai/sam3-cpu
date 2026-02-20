@@ -542,10 +542,13 @@ class Sam3VideoPredictorMultiCPU(Sam3VideoPredictor):
             logger.warning(
                 "CUDA is available. Consider using Sam3VideoPredictorMultiGPU for better performance."
             )
+
+        # logger.info(f"num_workers specified: {num_workers}")
         
         if num_workers is None:
-            # Use number of physical CPU cores by default
+            # Use number of logical CPU cores by default
             num_workers = psutil.cpu_count(logical=False) or mp.cpu_count()
+            logger.info(f"num_workers not specified, using {num_workers} logical CPU cores by default")
         
         IS_MAIN_PROCESS = os.getenv("IS_MAIN_PROCESS", "1") == "1"
         if IS_MAIN_PROCESS:

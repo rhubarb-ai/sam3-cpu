@@ -14,6 +14,7 @@ from collections import defaultdict
 
 import cv2
 import numpy as np
+from PIL import Image
 
 from sam3.logger import get_logger
 from sam3.__globals import (
@@ -214,13 +215,12 @@ class VideoPostProcessor:
             
             logger.info(f"        Matched {len(mapping)} objects between chunks")
             
-            # Invert mapping to get {i_id: j_id} format
-            # User expects: chunk_i's object_id -> chunk_j's object_id
-            inverted_mapping = {v: k for k, v in mapping.items()}
+            # mapping is already in {i_id: j_id} format (chunk_i obj -> chunk_j obj)
+            # No inversion needed - _match_chunks returns the correct format
             
             # Build mapping key
             mapping_key = f"chunk_{chunk_i_id:03d}->chunk_{chunk_j_id:03d}"
-            prompt_mappings[mapping_key] = inverted_mapping
+            prompt_mappings[mapping_key] = mapping
         
         return prompt_mappings
     
@@ -233,7 +233,10 @@ class VideoPostProcessor:
         """
         Match objects between two consecutive chunks.
         
-        Compares last frame of chunk_i with first frame of chunk_j.
+        Compares overlap frames from chunk_i with chunk_j.
+        For overlap_frames=1: compares last frame of chunk_i with first frame of chunk_j.
+        For overlap_frames=N: compares last N frames of chunk_i with first N frames of chunk_j,
+                              and computes best (maximum) IoU across all overlap frames.
         Uses greedy IoU matching.
         
         Args:
@@ -259,59 +262,173 @@ class VideoPostProcessor:
             logger.info(f"          No objects to match (chunk_{chunk_i_id}: {len(object_ids_i)}, chunk_{chunk_j_id}: {len(object_ids_j)})")
             return {}
         
-        logger.info(f"          Matching chunk_{chunk_i_id} ({len(object_ids_i)} objs) -> chunk_{chunk_j_id} ({len(object_ids_j)} objs)")
+        logger.info(f"          Matching chunk_{chunk_i_id} ({len(object_ids_i)} objs) -> chunk_{chunk_j_id} ({len(object_ids_j)} objs) with {self.overlap_frames} overlap frame(s)")
         
-        # Load masks from videos
-        masks_i = self._load_last_frame_masks(chunk_i, prompt)
-        masks_j = self._load_first_frame_masks(chunk_j, prompt)
+        # Load overlap frames from PNGs
+        # For overlap=1: load last 1 frame from chunk_i, first 1 frame from chunk_j
+        # For overlap=5: load last 5 frames from chunk_i, first 5 frames from chunk_j
+        overlap_masks_i = self._load_overlap_frames_from_pngs(chunk_i, prompt, position='end')
+        overlap_masks_j = self._load_overlap_frames_from_pngs(chunk_j, prompt, position='start')
         
-        logger.info(f"          Loaded masks: chunk_{chunk_i_id}={len(masks_i)}, chunk_{chunk_j_id}={len(masks_j)}")
+        logger.info(f"          Loaded overlap masks: chunk_{chunk_i_id}={len(overlap_masks_i)} frames, chunk_{chunk_j_id}={len(overlap_masks_j)} frames")
         
-        if not masks_i or not masks_j:
-            logger.info(f"          Failed to load masks for comparison")
+        if not overlap_masks_i or not overlap_masks_j:
+            logger.info(f"          Failed to load overlap masks for comparison")
             return {}
         
+        # Verify we have the same number of overlap frames
+        num_overlap = min(len(overlap_masks_i), len(overlap_masks_j))
+        if num_overlap < self.overlap_frames:
+            logger.warning(f"          Expected {self.overlap_frames} overlap frames, but got {num_overlap}. Using {num_overlap}.")
+        
         # For each object in chunk_i, find best match in chunk_j
+        # Compare across all overlap frames and compute best (maximum) IoU
         mappings = {}
         matched_j_ids = set()
         
+        # Get objects present in overlap regions
+        objects_i = set()
+        objects_j = set()
+        for frame_masks in overlap_masks_i:
+            objects_i.update(frame_masks.keys())
+        for frame_masks in overlap_masks_j:
+            objects_j.update(frame_masks.keys())
+        
+        logger.debug(f"          Starting matching for chunk_{chunk_i_id} -> chunk_{chunk_j_id}")
+        logger.debug(f"            Available in chunk_{chunk_i_id} overlap: {sorted(objects_i)}")
+        logger.debug(f"            Available in chunk_{chunk_j_id} overlap: {sorted(objects_j)}")
+        
         for id_i in object_ids_i:
-            if id_i not in masks_i:
+            if id_i not in objects_i:
+                logger.debug(f"            ⚠️  Skipping obj_{id_i} from chunk_{chunk_i_id} - not in overlap region")
                 continue
             
-            mask_i = masks_i[id_i]
             best_iou = 0
             best_id_j = None
+            
+            # Track object_1 specifically for debugging
+            is_debug_object = (chunk_i_id == 0 and id_i == 1)
+            if is_debug_object:
+                logger.info(f"            🔍 TRACKING chunk_0/object_1 across {num_overlap} overlap frame(s)")
             
             for id_j in object_ids_j:
                 if id_j in matched_j_ids:  # Already matched
                     continue
                 
-                if id_j not in masks_j:
+                if id_j not in objects_j:
                     continue
                 
-                mask_j = masks_j[id_j]
-                iou = self._compute_iou(mask_i, mask_j)
+                # Compute best (maximum) IoU across all overlap frames
+                ious = []
+                for frame_idx in range(num_overlap):
+                    mask_i = overlap_masks_i[frame_idx].get(id_i)
+                    mask_j = overlap_masks_j[frame_idx].get(id_j)
+                    
+                    if mask_i is not None and mask_j is not None:
+                        iou = self._compute_iou(mask_i, mask_j)
+                        ious.append(iou)
                 
-                logger.debug(f"              IoU(obj_{id_i}, obj_{id_j}) = {iou:.4f}")
+                # Best (maximum) IoU across overlap frames
+                best_iou_candidate = max(ious) if ious else 0.0
                 
-                if iou > best_iou:
-                    best_iou = iou
+                # Extra logging for debug object
+                if is_debug_object and best_iou_candidate > 0:
+                    logger.info(f"              vs chunk_{chunk_j_id}/object_{id_j}: best IoU={best_iou_candidate:.4f} (max over {len(ious)} frames: {[f'{x:.3f}' for x in ious]})")
+                else:
+                    logger.debug(f"              IoU(obj_{id_i}, obj_{id_j}) = {best_iou_candidate:.4f} (max over {len(ious)} frames)")
+                
+                if best_iou_candidate > best_iou:
+                    best_iou = best_iou_candidate
                     best_id_j = id_j
             
-            # Keep match if IoU exceeds threshold  
+            # Keep match if best IoU exceeds threshold  
             if best_iou > self.iou_threshold:
                 mappings[id_i] = best_id_j
                 matched_j_ids.add(best_id_j)
-                logger.info(f"            Matched: chunk_{chunk_i_id} obj_{id_i} -> chunk_{chunk_j_id} obj_{best_id_j} (IoU={best_iou:.3f})")
+                logger.info(f"            ✅ Matched: chunk_{chunk_i_id} obj_{id_i} -> chunk_{chunk_j_id} obj_{best_id_j} (best IoU={best_iou:.3f})")
             else:
-                logger.debug(f"            No match for obj_{id_i} (best IoU={best_iou:.4f} < threshold={self.iou_threshold})")
+                if is_debug_object:
+                    logger.info(f"            ❌ NO MATCH for obj_{id_i} (best IoU={best_iou:.4f} < threshold={self.iou_threshold})")
+                else:
+                    logger.debug(f"            No match for obj_{id_i} (best IoU={best_iou:.4f} < threshold={self.iou_threshold})")
         
         return mappings
     
+    def _load_overlap_frames_from_pngs(self, chunk: Dict, prompt: str, position: str = 'end') -> List[Dict[int, np.ndarray]]:
+        """
+        Load overlap frames masks from PNG images for a specific prompt.
+        
+        Args:
+            chunk: Chunk result dictionary.
+            prompt: Prompt name.
+            position: 'end' to load last N frames, 'start' to load first N frames.
+        
+        Returns:
+            List of dictionaries {object_id: mask_array} for each overlap frame.
+        """
+        chunk_id = chunk["chunk_id"]
+        prompt_result = chunk["prompts"].get(prompt, {})
+        object_ids = prompt_result.get("object_ids", [])
+        masks_dir = prompt_result.get("masks_dir")
+        
+        if not masks_dir or not object_ids:
+            return []
+        
+        masks_dir = Path(masks_dir)
+        overlap_frames = []  # List of {obj_id: mask} dicts, one per frame
+        
+        logger.debug(f"          Loading {position} {self.overlap_frames} overlap frame(s) for chunk_{chunk_id}")
+        
+        for obj_id in object_ids:
+            object_dir = masks_dir / f"object_{obj_id}"
+            
+            if not object_dir.exists():
+                logger.warning(f"            Mask directory not found: {object_dir}")
+                continue
+            
+            # Get all PNG files
+            png_files = sorted(object_dir.glob("frame_*.png"))
+            
+            if not png_files:
+                logger.warning(f"            No PNG files found in: {object_dir}")
+                continue
+            
+            # Select overlap frames based on position
+            if position == 'end':
+                # Last N frames
+                selected_pngs = png_files[-self.overlap_frames:]
+            else:  # 'start'
+                # First N frames
+                selected_pngs = png_files[:self.overlap_frames]
+            
+            # Read selected frames
+            for frame_idx, png_path in enumerate(selected_pngs):
+                try:
+                    # Use PIL for reading
+                    pil_image = Image.open(png_path)
+                    mask_image = np.array(pil_image)
+                    if mask_image is not None and mask_image.size > 0:
+                        mask_binary = (mask_image > 0).astype(np.uint8)
+                        
+                        # Ensure we have enough frame dicts in the list
+                        while len(overlap_frames) <= frame_idx:
+                            overlap_frames.append({})
+                        
+                        overlap_frames[frame_idx][obj_id] = mask_binary
+                        
+                        if frame_idx == 0:  # Log only first frame for brevity
+                            nonzero = np.count_nonzero(mask_binary)
+                            logger.debug(f"            ✓ chunk_{chunk_id}/object_{obj_id}: {len(selected_pngs)} frames, first has {nonzero} pixels")
+                except Exception as e:
+                    logger.warning(f"            Failed to read mask {png_path}: {e}")
+        
+        logger.info(f"          Loaded {len(overlap_frames)} overlap frame(s) from chunk_{chunk_id} ({len(object_ids)} objects)")
+        return overlap_frames
+    
     def _load_last_frame_masks(self, chunk: Dict, prompt: str) -> Dict[int, np.ndarray]:
         """
-        Load last frame masks from a chunk for a specific prompt.
+        Load last frame masks from PNG images for a specific prompt.
+        Convenience wrapper for backward compatibility.
         
         Args:
             chunk: Chunk result dictionary.
@@ -320,54 +437,14 @@ class VideoPostProcessor:
         Returns:
             Dictionary {object_id: mask_array}.
         """
-        chunk_id = chunk["chunk_id"]
-        prompt_result = chunk["prompts"].get(prompt, {})
-        object_ids = prompt_result.get("object_ids", [])
-        masks_dir = prompt_result.get("masks_dir")
-        
-        if not masks_dir or not object_ids:
-            return {}
-        
-        masks_dir = Path(masks_dir)
-        masks = {}
-        
-        for obj_id in object_ids:
-            mask_video_path = masks_dir / f"object_{obj_id}.mp4"
-            
-            if not mask_video_path.exists():
-                logger.warning(f"            Mask video not found: {mask_video_path}")
-                continue
-            
-            cap = cv2.VideoCapture(str(mask_video_path))
-            if not cap.isOpened():
-                logger.warning(f"            Cannot open: {mask_video_path}")
-                continue
-            
-            try:
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                if total_frames == 0:
-                    continue
-                
-                # Read last frame
-                cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames - 1)
-                ret, frame = cap.read()
-                
-                if ret:
-                    # Convert to binary mask
-                    if len(frame.shape) == 3:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    masks[obj_id] = (frame > 0).astype(np.uint8)
-                else:
-                    logger.warning(f"            Failed to read last frame from {mask_video_path}")
-            finally:
-                cap.release()
-        
-        logger.info(f"          Loaded {len(masks)} last frame masks from chunk_{chunk_id} (out of {len(object_ids)} objects)")
-        return masks
+        overlap_frames = self._load_overlap_frames_from_pngs(chunk, prompt, position='end')
+        # Return the last frame (most recent)
+        return overlap_frames[-1] if overlap_frames else {}
     
     def _load_first_frame_masks(self, chunk: Dict, prompt: str) -> Dict[int, np.ndarray]:
         """
-        Load first frame masks from a chunk for a specific prompt.
+        Load first frame masks from PNG images for a specific prompt.
+        Convenience wrapper for backward compatibility.
         
         Args:
             chunk: Chunk result dictionary.
@@ -376,46 +453,9 @@ class VideoPostProcessor:
         Returns:
             Dictionary {object_id: mask_array}.
         """
-        chunk_id = chunk["chunk_id"]
-        prompt_result = chunk["prompts"].get(prompt, {})
-        object_ids = prompt_result.get("object_ids", [])
-        masks_dir = prompt_result.get("masks_dir")
-        
-        if not masks_dir or not object_ids:
-            return {}
-        
-        masks_dir = Path(masks_dir)
-        masks = {}
-        
-        for obj_id in object_ids:
-            mask_video_path = masks_dir / f"object_{obj_id}.mp4"
-            
-            if not mask_video_path.exists():
-                logger.warning(f"            Mask video not found: {mask_video_path}")
-                continue
-            
-            cap = cv2.VideoCapture(str(mask_video_path))
-            if not cap.isOpened():
-                logger.warning(f"            Cannot open: {mask_video_path}")
-                continue
-            
-            try:
-                # Read first frame
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ret, frame = cap.read()
-                
-                if ret:
-                    # Convert to binary mask
-                    if len(frame.shape) == 3:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    masks[obj_id] = (frame > 0).astype(np.uint8)
-                else:
-                    logger.warning(f"            Failed to read first frame from {mask_video_path}")
-            finally:
-                cap.release()
-        
-        logger.info(f"          Loaded {len(masks)} first frame masks from chunk_{chunk_id} (out of {len(object_ids)} objects)")
-        return masks
+        overlap_frames = self._load_overlap_frames_from_pngs(chunk, prompt, position='start')
+        # Return the first frame
+        return overlap_frames[0] if overlap_frames else {}
     
     def _match_frame_masks(
         self,
@@ -702,21 +742,21 @@ class VideoPostProcessor:
                         logger.warning(f"          Chunk {chunk_id} not found")
                         continue
                     
-                    # Get mask video path
+                    # Get mask directory path
                     prompt_result = chunk_result["prompts"].get(prompt, {})
                     masks_dir = prompt_result.get("masks_dir")
                     if not masks_dir:
                         logger.warning(f"          Masks dir not found for chunk {chunk_id}")
                         continue
                     
-                    mask_video_path = Path(masks_dir) / f"object_{local_id}.mp4"
-                    if not mask_video_path.exists():
-                        logger.warning(f"          Mask video not found: {mask_video_path}")
+                    mask_object_dir = Path(masks_dir) / f"object_{local_id}"
+                    if not mask_object_dir.exists():
+                        logger.warning(f"          Mask directory not found: {mask_object_dir}")
                         continue
                     
                     # Copy frames from this segment
-                    frames_copied = self._copy_frames_from_mask_video(
-                        mask_video_path, 
+                    frames_copied = self._copy_frames_from_mask_pngs(
+                        mask_object_dir, 
                         writer, 
                         skip_first_n=(self.overlap_frames if chain_idx > 0 else 0)
                     )
@@ -824,44 +864,53 @@ class VideoPostProcessor:
                 return chunk_result
         return None
     
-    def _copy_frames_from_mask_video(
+    def _copy_frames_from_mask_pngs(
         self, 
-        mask_video_path: Path, 
+        mask_dir: Path, 
         writer: cv2.VideoWriter,
         skip_first_n: int = 0
     ) -> int:
         """
-        Copy frames from a mask video to the output writer.
+        Copy frames from PNG mask images to the output writer.
         
         Args:
-            mask_video_path: Path to source mask video.
+            mask_dir: Directory containing PNG mask files (frame_*.png).
             writer: VideoWriter to write frames to.
             skip_first_n: Number of initial frames to skip (for overlap removal).
         
         Returns:
             Number of frames copied.
         """
-        cap = cv2.VideoCapture(str(mask_video_path))
-        if not cap.isOpened():
-            logger.warning(f"          Cannot open mask video: {mask_video_path}")
+        if not mask_dir.exists():
+            logger.warning(f"          Mask directory not found: {mask_dir}")
             return 0
         
-        try:
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            frames_copied = 0
-            
-            for frame_idx in range(skip_first_n, total_frames):
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ret, frame = cap.read()
-                if ret:
-                    # Convert to grayscale if needed
-                    if len(frame.shape) == 3:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    writer.write(frame)
-                    frames_copied += 1
+        # Get all PNG files sorted by frame number
+        png_files = sorted(mask_dir.glob("frame_*.png"))
+        
+        if not png_files:
+            logger.warning(f"          No PNG files found in: {mask_dir}")
+            return 0
+        
+        frames_copied = 0
+        
+        # Skip first N frames (overlap removal)
+        for png_file in png_files[skip_first_n:]:
+            try:
+                # Use PIL for reading (matches PIL saving in chunk_processor)
+                pil_image = Image.open(png_file)
+                mask_image = np.array(pil_image)
+                
+                if mask_image is not None and mask_image.size > 0:
+                    # Validate mask before writing to video
+                    if len(mask_image.shape) == 2 and mask_image.dtype == np.uint8:
+                        writer.write(mask_image)
+                        frames_copied += 1
+                    else:
+                        logger.warning(f"          Invalid mask shape/dtype: {png_file} - shape={mask_image.shape}, dtype={mask_image.dtype}")
                 else:
-                    logger.warning(f"          Failed to read frame {frame_idx} from {mask_video_path}")
-            
-            return frames_copied
-        finally:
-            cap.release()
+                    logger.warning(f"          Failed to read PNG (corrupted or empty): {png_file}")
+            except Exception as e:
+                logger.error(f"          Error reading PNG {png_file}: {e}")
+        
+        return frames_copied

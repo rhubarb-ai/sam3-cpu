@@ -711,8 +711,8 @@ class Sam3Entrypoint:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
             # Use ffmpeg to extract chunk by time
-            # Note: Using re-encoding (-c:v libx264) for precise frame boundaries
-            # -c copy would be faster but can only cut at keyframes, causing frame count mismatches
+            # Note: Using lossless H.264 (qp=0) for pixel-perfect chunks
+            # This ensures overlap frames are identical for accurate mask matching
             cmd = [
                 'ffmpeg',
                 '-loglevel', 'error',  # Only show errors
@@ -720,8 +720,8 @@ class Sam3Entrypoint:
                 '-ss', str(chunk_info.start_time_sec),  # Start time (before -i for speed)
                 '-i', video_path,
                 '-t', str(chunk_info.duration_sec),  # Duration
-                '-c:v', 'libx264',  # Re-encode for precise cuts
-                '-crf', '23',  # Quality (23 is default)
+                '-c:v', 'libx264',  # H.264 codec
+                '-qp', '0',  # Lossless mode (QP=0)
                 '-preset', 'veryfast',  # Speed up encoding
                 '-c:a', 'copy',  # Copy audio (if any)
                 output_path

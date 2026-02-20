@@ -46,16 +46,17 @@ class FFMpegLib:
     
     @staticmethod
     def create_video_chunk(input_video, output_video, start_frame, end_frame):
-        """Create a video chunk using ffmpeg."""
+        """Create a video chunk using ffmpeg with lossless codec."""
         cmd = [
             "ffmpeg",
             "-y",
             "-i", str(input_video),
             "-map", "0:v:0",
             "-vf", f"select='between(n\\,{start_frame}\\,{end_frame})',setpts=PTS-STARTPTS",
-            "-c:v", "libx264",
-            "-an",  # REMOVE AUDIO STREAM
-            "-preset", "veryfast",
+            "-c:v", "libx264",  # H.264 codec
+            "-qp", "0",         # Lossless mode (QP=0)
+            "-preset", "veryfast",  # Speed up encoding
+            "-an",  # Remove audio stream
             str(output_video)
         ]
         output = run_cmd(cmd)

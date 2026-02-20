@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
+from PIL import Image
 
 from sam3.logger import get_logger
 from sam3.__globals import DEFAULT_PROPAGATION_DIRECTION
@@ -228,53 +229,58 @@ class ChunkProcessor:
         prompt_masks_dir: Path
     ):
         """
-        Save masks for all detected objects as video files.
+        Save masks for all detected objects as PNG images (lossless).
         
-        Creates one MP4 video file per object ID, where each frame shows the
-        binary mask for that object (255 for object pixels, 0 for background).
+        Creates one directory per object ID, with PNG files for each frame.
+        This ensures pixel-perfect masks for accurate cross-chunk matching.
         
         Args:
             result_prompt: Dictionary mapping frame indices to prediction results.
             object_ids: Set of all object IDs detected in this prompt.
-            prompt_masks_dir: Directory to save mask videos.
+            prompt_masks_dir: Directory to save mask images.
         """
-        logger.debug(f"        Saving masks for {len(object_ids)} object(s)")
+        logger.debug(f"        Saving masks for {len(object_ids)} object(s) as PNG images")
         
         # Get video properties
-        fps = self.video_metadata.get("fps", 25)
         width = self.video_metadata.get("width")
         height = self.video_metadata.get("height")
         
-        # Create a video writer for each object ID
-        video_writers = {}
+        # Get total frame count from chunk video
+        cap = cv2.VideoCapture(str(self.chunk_video_path))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
         
+        if total_frames <= 0:
+            logger.error(f"        Failed to get frame count for chunk video: {self.chunk_video_path}")
+            return
+        
+        logger.debug(f"        Chunk has {total_frames} frames, will save PNG for each frame")
+        
+        # Create a directory for each object ID
+        object_dirs = {}
         for object_id in object_ids:
-            mask_video_path = prompt_masks_dir / f"object_{object_id}.mp4"
-            
-            # Create video writer
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            video_writer = cv2.VideoWriter(
-                str(mask_video_path),
-                fourcc,
-                fps,
-                (width, height),
-                isColor=False
-            )
-            
-            if not video_writer.isOpened():
-                raise RuntimeError(f"Failed to create video writer for {mask_video_path}")
-            
-            video_writers[object_id] = video_writer
+            object_dir = prompt_masks_dir / f"object_{object_id}"
+            object_dir.mkdir(parents=True, exist_ok=True)
+            object_dirs[object_id] = object_dir
         
-        try:
-            # Iterate through frames in order
-            for frame_idx in sorted(result_prompt.keys()):
+        # Iterate through ALL frames in the chunk (0 to total_frames-1)
+        for frame_idx in range(total_frames):
+            # Check if this frame has tracking results
+            if frame_idx in result_prompt:
                 frame_output = result_prompt[frame_idx]
+            else:
+                # Frame not tracked (no objects detected), will use blank masks
+                frame_output = None
+            
+            # For each object ID, save its mask frame as PNG
+            for object_id in object_ids:
+                object_dir = prompt_masks_dir / f"object_{object_id}"
                 
-                # For each object ID, write its mask frame
-                for object_id in object_ids:
-                    video_writer = video_writers[object_id]
-                    
+                # Initialize with blank mask (default)
+                mask_uint8 = np.zeros((height, width), dtype=np.uint8)
+                
+                # If frame was tracked, try to get the actual mask
+                if frame_output is not None:
                     # Get out_obj_ids and ensure it's a list/array we can work with
                     out_obj_ids = frame_output.get("out_obj_ids", [])
                     
@@ -285,7 +291,6 @@ class ChunkProcessor:
                     # Check if this object exists in current frame
                     if object_id in out_obj_ids:
                         # Find the position of object_id in out_obj_ids list
-                        # out_binary_masks is indexed positionally, not by object_id
                         try:
                             obj_idx = out_obj_ids.index(object_id)
                             mask_bool = frame_output["out_binary_masks"][obj_idx]
@@ -293,25 +298,36 @@ class ChunkProcessor:
                             # Convert to uint8 (0 or 255)
                             if mask_bool.any():
                                 mask_uint8 = (mask_bool.astype(np.uint8) * 255)
-                            else:
-                                # Empty mask
-                                mask_uint8 = np.zeros((height, width), dtype=np.uint8)
+                            # else: keep blank mask (already initialized)
                         except (IndexError, ValueError) as e:
-                            # If we can't find the object or index is wrong, write blank
+                            # If we can't find the object or index is wrong, use blank
                             logger.warning(f"Could not get mask for object {object_id} in frame {frame_idx}: {e}")
-                            mask_uint8 = np.zeros((height, width), dtype=np.uint8)
-                    else:
-                        # Object not present in this frame, write blank
-                        mask_uint8 = np.zeros((height, width), dtype=np.uint8)
-                    
-                    # Write frame to video
-                    video_writer.write(mask_uint8)
+                    # else: object not in this frame, keep blank mask
+                
+                # Validate mask before saving
+                if mask_uint8.shape != (height, width):
+                    logger.error(f"Invalid mask shape {mask_uint8.shape}, expected ({height}, {width}). Creating blank mask.")
+                    mask_uint8 = np.zeros((height, width), dtype=np.uint8)
+                
+                if mask_uint8.dtype != np.uint8:
+                    logger.warning(f"Converting mask dtype from {mask_uint8.dtype} to uint8")
+                    mask_uint8 = mask_uint8.astype(np.uint8)
+                
+                # Ensure 2D array (grayscale)
+                if len(mask_uint8.shape) > 2:
+                    logger.warning(f"Mask has {len(mask_uint8.shape)} dimensions, squeezing to 2D")
+                    mask_uint8 = mask_uint8.squeeze()
+                
+                # Save frame as PNG using PIL (more robust than cv2.imwrite)
+                png_path = object_dir / f"frame_{frame_idx:06d}.png"
+                try:
+                    # Convert numpy array to PIL Image and save
+                    pil_image = Image.fromarray(mask_uint8, mode='L')  # 'L' mode = grayscale
+                    pil_image.save(png_path, format='PNG', compress_level=1)
+                except Exception as e:
+                    logger.error(f"Failed to write PNG {png_path}: {e}")
         
-        finally:
-            # Release all video writers
-            for object_id, video_writer in video_writers.items():
-                video_writer.release()
-                logger.debug(f"        Saved mask video for object {object_id}")
+        logger.debug(f"        Saved PNG masks for {len(object_ids)} object(s)")
     
     def cleanup(self):
         """Release resources and free memory.

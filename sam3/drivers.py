@@ -455,7 +455,7 @@ class Sam3VideoDriver():
         self._get_predictor(bpe_path=bpe_path, num_workers=num_workers)
 
     @profile()
-    def _get_predictor(self, bpe_path: Optional[str], num_workers: Optional[int], device: str = DEVICE.type):
+    def _get_predictor(self, bpe_path: Optional[str], num_workers: Optional[int] = None, device: str = DEVICE.type):
         """Internal method to initialize video predictor with device-specific optimizations.
         
         Args:
