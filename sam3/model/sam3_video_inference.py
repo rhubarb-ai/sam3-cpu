@@ -977,6 +977,157 @@ class Sam3VideoInference(Sam3VideoBase):
         # Needed for retraining compatibility with trainer
         return targets
 
+    @torch.inference_mode()
+    def inject_masks(
+        self,
+        inference_state,
+        frame_idx,
+        masks,
+        object_ids,
+    ):
+        """Inject masks into the tracker as conditioning frames for cross-chunk continuity.
+
+        This method creates new tracker state(s) and adds masks via the tracker's
+        add_new_mask mechanism. This is the same internal path that the VG pipeline
+        uses to hand off detected objects to the tracker (via _tracker_add_new_objects).
+
+        After injection, the tracker treats these as conditioning memory frames,
+        enabling propagation of previously tracked objects into a new chunk/session
+        without re-detection.
+
+        Args:
+            inference_state: Current inference state dict.
+            frame_idx: Frame index to inject masks on (typically 0 for start of new chunk).
+            masks: Dict mapping object_id (int) to mask (2D tensor or numpy array, H x W).
+            object_ids: List of object IDs to inject.
+
+        Returns:
+            List of successfully injected object IDs.
+        """
+        import numpy as np
+
+        if not object_ids or not masks:
+            logger.debug("inject_masks: no masks to inject")
+            return []
+
+        # Initialize tracker metadata if empty
+        tracker_metadata = inference_state["tracker_metadata"]
+        if tracker_metadata == {}:
+            tracker_metadata.update(self._initialize_metadata())
+
+        # Prepare backbone features for this frame (needed by tracker)
+        self._prepare_backbone_feats(inference_state, frame_idx, reverse=False)
+
+        # Create a new tracker state for the injected objects
+        new_tracker_state = self.tracker.init_state(
+            cached_features=inference_state["feature_cache"],
+            video_height=inference_state["orig_height"],
+            video_width=inference_state["orig_width"],
+            num_frames=inference_state["num_frames"],
+        )
+
+        injected_ids = []
+        for obj_id in object_ids:
+            mask_data = masks.get(obj_id)
+            if mask_data is None:
+                logger.warning(f"inject_masks: no mask for obj_id {obj_id}, skipping")
+                continue
+
+            # Convert numpy to tensor if needed
+            if isinstance(mask_data, np.ndarray):
+                mask_tensor = torch.from_numpy(mask_data).float()
+            elif isinstance(mask_data, torch.Tensor):
+                mask_tensor = mask_data.float()
+            else:
+                logger.warning(f"inject_masks: unsupported mask type {type(mask_data)} for obj_id {obj_id}")
+                continue
+
+            # Ensure 2D
+            if mask_tensor.dim() > 2:
+                mask_tensor = mask_tensor.squeeze()
+            assert mask_tensor.dim() == 2, f"Mask must be 2D, got {mask_tensor.dim()}D"
+
+            # Normalize mask to boolean-like (0/1)
+            if mask_tensor.max() > 1:
+                mask_tensor = (mask_tensor > 127).float()
+
+            # Add mask to tracker state
+            self.tracker.add_new_mask(
+                inference_state=new_tracker_state,
+                frame_idx=frame_idx,
+                obj_id=obj_id,
+                mask=mask_tensor,
+                add_mask_to_memory=True,
+            )
+
+            # Update tracker metadata
+            obj_rank = 0  # Single GPU / CPU — assign to rank 0
+            tracker_metadata["obj_ids_per_gpu"][obj_rank] = np.concatenate([
+                tracker_metadata["obj_ids_per_gpu"][obj_rank],
+                np.array([obj_id], dtype=np.int64),
+            ])
+            tracker_metadata["num_obj_per_gpu"][obj_rank] = len(
+                tracker_metadata["obj_ids_per_gpu"][obj_rank]
+            )
+            tracker_metadata["obj_ids_all_gpu"] = np.concatenate(
+                tracker_metadata["obj_ids_per_gpu"]
+            )
+            tracker_metadata["max_obj_id"] = max(
+                tracker_metadata["max_obj_id"], obj_id
+            )
+            tracker_metadata["obj_id_to_score"][obj_id] = 1.0
+            tracker_metadata["obj_id_to_tracker_score_frame_wise"][frame_idx][obj_id] = 1.0
+
+            injected_ids.append(obj_id)
+            logger.debug(f"inject_masks: injected obj_id={obj_id} on frame {frame_idx}")
+
+        if injected_ids:
+            # Consolidate memory encoding for all injected masks
+            self.tracker.propagate_in_video_preflight(
+                new_tracker_state, run_mem_encoder=True
+            )
+            # Append the new tracker state to the inference state
+            inference_state["tracker_inference_states"].append(new_tracker_state)
+
+            # Mark the frame as having outputs so propagation starts correctly
+            inference_state["previous_stages_out"][frame_idx] = "_THIS_FRAME_HAS_OUTPUTS_"
+
+            # Add action history for proper propagation type resolution
+            self.add_action_history(
+                inference_state, "add",
+                frame_idx=frame_idx,
+                obj_ids=injected_ids,
+            )
+
+            # Update rank0 metadata for injected objects
+            if self.rank == 0:
+                rank0_metadata = tracker_metadata.get("rank0_metadata", {})
+                if "masklet_confirmation" in rank0_metadata:
+                    # Mark injected objects as confirmed (they come from previous chunk)
+                    for obj_id in injected_ids:
+                        obj_ids_all = tracker_metadata["obj_ids_all_gpu"]
+                        obj_indices = np.where(obj_ids_all == obj_id)[0]
+                        if len(obj_indices) > 0:
+                            obj_idx = obj_indices[0]
+                            mc = rank0_metadata["masklet_confirmation"]
+                            # Extend arrays if needed
+                            while obj_idx >= len(mc["status"]):
+                                mc["status"] = np.append(mc["status"], np.int64(0))
+                                mc["consecutive_det_num"] = np.append(
+                                    mc["consecutive_det_num"], np.int64(0)
+                                )
+                            mc["status"][obj_idx] = 1  # confirmed
+                            mc["consecutive_det_num"][obj_idx] = (
+                                self.masklet_confirmation_consecutive_det_thresh
+                            )
+
+            logger.info(
+                f"inject_masks: successfully injected {len(injected_ids)} object(s) "
+                f"on frame {frame_idx}: {injected_ids}"
+            )
+
+        return injected_ids
+
 
 class Sam3VideoInferenceWithInstanceInteractivity(Sam3VideoInference):
     def __init__(

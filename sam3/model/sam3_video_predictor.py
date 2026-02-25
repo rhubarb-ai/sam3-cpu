@@ -81,6 +81,13 @@ class Sam3VideoPredictor:
                 obj_id=request["obj_id"],
                 is_user_action=request.get("is_user_action", True),
             )
+        elif request_type == "inject_masks":
+            return self.inject_masks(
+                session_id=request["session_id"],
+                frame_idx=request["frame_index"],
+                masks=request["masks"],
+                object_ids=request["object_ids"],
+            )
         elif request_type == "reset_session":
             return self.reset_session(session_id=request["session_id"])
         elif request_type == "close_session":
@@ -227,6 +234,41 @@ class Sam3VideoPredictor:
             logger.debug(
                 f"propagation ended in session {session_id}; {self._get_session_stats()}"
             )
+
+    def inject_masks(
+        self,
+        session_id: str,
+        frame_idx: int,
+        masks: dict,
+        object_ids: list,
+    ):
+        """Inject masks from a previous chunk into the tracker as conditioning frames.
+
+        This creates new tracker states with the provided masks, allowing objects
+        tracked in a previous chunk to be carried into this session without
+        re-detection. The masks act as initial conditioning memory for the tracker.
+
+        Args:
+            session_id: Active session identifier.
+            frame_idx: Frame index to inject masks on (typically 0 for chunk start).
+            masks: Dict mapping object_id (int) to mask (2D numpy array or tensor).
+            object_ids: List of object IDs to inject.
+        """
+        import numpy as np
+        logger.debug(
+            f"inject_masks on frame {frame_idx} in session {session_id}: "
+            f"{len(object_ids)} object(s)"
+        )
+        session = self._get_session(session_id)
+        inference_state = session["state"]
+
+        injected_ids = self.model.inject_masks(
+            inference_state=inference_state,
+            frame_idx=frame_idx,
+            masks=masks,
+            object_ids=object_ids,
+        )
+        return {"injected_object_ids": injected_ids}
 
     def reset_session(self, session_id):
         """Reset the session to its initial state (as when it's initial opened)."""

@@ -25,6 +25,7 @@
 - [Quick Start](#quick-start)
 - [Advanced Video Features](#advanced-video-features)
   - [Automatic Video Chunking](#automatic-video-chunking)
+  - [Cross-Chunk Mask Injection](#cross-chunk-mask-injection)
   - [Frame/Time Range Extraction](#frametime-range-extraction)
   - [Default Propagation Direction](#default-propagation-direction)
 - [Usage Examples](#usage-examples)
@@ -221,6 +222,58 @@ Number of Chunks: 4
 ============================================================
 Processing chunk 1/4 (frames 0-1683)...
 ```
+
+### Cross-Chunk Mask Injection
+
+When a video is split into chunks, objects can be lost at chunk boundaries because each chunk is processed independently. **Cross-chunk mask injection** solves this by carrying tracked object masks from the end of chunk N into the start of chunk N+1:
+
+```python
+from sam3 import Sam3API
+
+api = Sam3API()
+
+# Automatic: mask injection happens transparently during multi-chunk processing
+result = api.process_video_with_prompts(
+    video_path="long_video.mp4",
+    prompts=["player", "ball"],
+    keep_temp_files=True  # inspect chunk masks
+)
+api.cleanup()
+```
+
+**How It Works:**
+1. **Chunk 0**: Detects objects via text prompt, propagates tracker, saves masks
+2. **Chunk 1+**: Injects previous chunk's last-frame masks on frame 0 via `tracker.add_new_mask()`, then runs the text prompt to detect any *new* objects, then propagates both injected + new objects
+3. **Post-processing**: Injected objects are matched deterministically (same IDs), while newly detected objects fall back to IoU-based matching
+
+**Processing Pre-Split Chunks:**
+
+If you already have separate chunk files, use the driver-level API directly with `test_chunks_injection.py`:
+
+```bash
+# Process pre-split chunks with mask injection between them
+python3 test_chunks_injection.py \
+    --chunks-dir assets/videos/private/my_chunks \
+    --prompts player ball \
+    --output results/my_injection_test
+```
+
+**Example Output:**
+```
+Chunk 0 (chunk_000.mp4): 3 objs in 25 frames, new=[0, 1, 3]
+Chunk 1 (chunk_001.mp4): 4 objs in 25 frames, injected=[0, 1, 3], new=[2]
+Chunk 2 (chunk_002.mp4): 4 objs in 25 frames, injected=[0, 1, 2, 3], new=[4, 5]
+Chunk 3 (chunk_003.mp4): 6 objs in 25 frames, injected=[0, 3, 4, 5], new=[1, 2]
+Chunk 4 (chunk_004.mp4): 6 objs in 25 frames, injected=[0, 1, 2, 3, 4, 5]
+```
+
+**Benefits:**
+- ✅ **Seamless continuity**: Objects tracked across chunk boundaries without re-detection
+- ✅ **Deterministic matching**: Injected objects keep their IDs (no IoU guessing)
+- ✅ **Additive**: New objects in later chunks are still detected and tracked
+- ✅ **Transparent**: Works automatically in the standard `process_video_with_prompts` pipeline
+
+> For full technical details see [docs/local/CROSS_CHUNK_MASK_INJECTION.md](docs/local/CROSS_CHUNK_MASK_INJECTION.md)
 
 ### Frame/Time Range Extraction
 

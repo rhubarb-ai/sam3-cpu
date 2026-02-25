@@ -305,16 +305,15 @@ class VideoProcessor:
         
         logger.debug(f"  Chunk video path: {chunk_video_path}")
         
-        # Initialize ChunkProcessor
+        # Initialize ChunkProcessor with shared driver
+        driver = self._get_video_driver()
         chunk_processor = ChunkProcessor(
             chunk_id=0,
             chunk_video_path=chunk_video_path,
             chunk_dir=chunk_dir,
             video_name=self.video_name,
             video_metadata=video_metadata,
-            device=self.device,
-            bpe_path=self.bpe_path,
-            num_workers=self.num_workers
+            driver=driver
         )
         
         # Process chunk with all prompts
@@ -333,7 +332,12 @@ class VideoProcessor:
         propagation_direction: str
     ) -> List[Dict[str, Any]]:
         """
-        Process video in multiple chunks.
+        Process video in multiple chunks with cross-chunk mask injection.
+        
+        After processing chunk N, extracts last-frame masks and passes them
+        to chunk N+1 as carry-forward data. This enables previously tracked
+        objects to seamlessly continue into subsequent chunks without relying
+        solely on post-hoc IoU matching.
         
         Args:
             prompts: List of text prompts.
@@ -347,6 +351,7 @@ class VideoProcessor:
         from sam3.chunk_processor import ChunkProcessor
         
         chunk_results = []
+        prev_chunk_data = None  # Carry-forward data from previous chunk
         
         for chunk_info in video_chunks:
             chunk_id = chunk_info["chunk"]
@@ -384,11 +389,20 @@ class VideoProcessor:
                 driver=driver
             )
             
-            # Process chunk with all prompts
+            # Process chunk with all prompts + carry-forward data from previous chunk
             chunk_result = chunk_processor.process_with_prompts(
                 prompts=prompts,
-                propagation_direction=propagation_direction
+                propagation_direction=propagation_direction,
+                prev_chunk_data=prev_chunk_data
             )
+            
+            # Extract carry-forward data for the next chunk
+            prev_chunk_data = chunk_result.get("carry_forward")
+            if prev_chunk_data:
+                total_masks = sum(len(m) for m in prev_chunk_data.get("masks", {}).values())
+                logger.info(f"    Carry-forward: {total_masks} mask(s) for next chunk")
+            else:
+                logger.debug(f"    No carry-forward data for next chunk")
             
             chunk_results.append(chunk_result)
         

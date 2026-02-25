@@ -818,6 +818,68 @@ class Sam3VideoDriver():
         )
 
     @profile()
+    def inject_masks(
+        self,
+        session_id: str,
+        frame_idx: int,
+        masks: dict,
+        object_ids: list,
+    ):
+        """Inject masks from a previous chunk into the tracker for cross-chunk continuity.
+
+        This method injects binary masks as conditioning frames into the tracker's memory,
+        allowing objects tracked in a previous chunk to seamlessly continue into the current
+        session. After injection, call propagate_in_video() to track these objects forward.
+
+        This is the core mechanism for Option B cross-chunk state propagation: the overlap
+        frame's tracked masks from chunk N become the initial conditioning for chunk N+1.
+
+        Args:
+            session_id: Active session identifier from start_session().
+            frame_idx: Frame index to inject masks on (typically 0 for chunk start).
+            masks: Dictionary mapping object_id (int) to mask (2D numpy array, H x W,
+                   values 0 or 255 for background/foreground).
+            object_ids: List of object IDs to inject (must match keys in masks dict).
+
+        Returns:
+            Dictionary with 'injected_object_ids' list.
+
+        Raises:
+            ValueError: If model not loaded or session invalid.
+
+        Example:
+            >>> # Previous chunk produced masks for objects 0, 1, 2
+            >>> prev_masks = {0: mask_array_0, 1: mask_array_1, 2: mask_array_2}
+            >>> obj_ids = [0, 1, 2]
+            >>> 
+            >>> # Start new session on next chunk
+            >>> session_id = driver.start_session("chunk_1.mp4")
+            >>> 
+            >>> # Inject previous chunk's last-frame masks on frame 0
+            >>> result = driver.inject_masks(session_id, frame_idx=0,
+            ...     masks=prev_masks, object_ids=obj_ids)
+            >>> 
+            >>> # Optionally add text prompt for NEW object detection
+            >>> driver.add_prompt(session_id, "person")
+            >>> 
+            >>> # Propagate (tracks both injected + newly detected objects)
+            >>> driver.propagate_in_video(session_id)
+        """
+        if self.predictor is None:
+            raise ValueError("Model is not loaded.")
+
+        response = self.predictor.handle_request(
+            request=dict(
+                type="inject_masks",
+                session_id=session_id,
+                frame_index=frame_idx,
+                masks=masks,
+                object_ids=object_ids,
+            )
+        )
+        return response
+
+    @profile()
     def remove_object(self, session_id: str, object_id: int):
         """Remove an object from the video segmentation session.
         

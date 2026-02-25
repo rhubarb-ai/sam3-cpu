@@ -233,11 +233,9 @@ class VideoPostProcessor:
         """
         Match objects between two consecutive chunks.
         
-        Compares overlap frames from chunk_i with chunk_j.
-        For overlap_frames=1: compares last frame of chunk_i with first frame of chunk_j.
-        For overlap_frames=N: compares last N frames of chunk_i with first N frames of chunk_j,
-                              and computes best (maximum) IoU across all overlap frames.
-        Uses greedy IoU matching.
+        First, deterministically matches objects that were injected from chunk_i into
+        chunk_j (they share the same object IDs by construction). Then, for remaining
+        unmatched objects, falls back to IoU-based matching on the overlap frames.
         
         Args:
             chunk_i: Previous chunk result.
@@ -264,93 +262,71 @@ class VideoPostProcessor:
         
         logger.info(f"          Matching chunk_{chunk_i_id} ({len(object_ids_i)} objs) -> chunk_{chunk_j_id} ({len(object_ids_j)} objs) with {self.overlap_frames} overlap frame(s)")
         
-        # Load overlap frames from PNGs
-        # For overlap=1: load last 1 frame from chunk_i, first 1 frame from chunk_j
-        # For overlap=5: load last 5 frames from chunk_i, first 5 frames from chunk_j
-        overlap_masks_i = self._load_overlap_frames_from_pngs(chunk_i, prompt, position='end')
-        overlap_masks_j = self._load_overlap_frames_from_pngs(chunk_j, prompt, position='start')
-        
-        logger.info(f"          Loaded overlap masks: chunk_{chunk_i_id}={len(overlap_masks_i)} frames, chunk_{chunk_j_id}={len(overlap_masks_j)} frames")
-        
-        if not overlap_masks_i or not overlap_masks_j:
-            logger.info(f"          Failed to load overlap masks for comparison")
-            return {}
-        
-        # Verify we have the same number of overlap frames
-        num_overlap = min(len(overlap_masks_i), len(overlap_masks_j))
-        if num_overlap < self.overlap_frames:
-            logger.warning(f"          Expected {self.overlap_frames} overlap frames, but got {num_overlap}. Using {num_overlap}.")
-        
-        # For each object in chunk_i, find best match in chunk_j
-        # Compare across all overlap frames and compute best (maximum) IoU
         mappings = {}
         matched_j_ids = set()
         
-        # Get objects present in overlap regions
-        objects_i = set()
-        objects_j = set()
-        for frame_masks in overlap_masks_i:
-            objects_i.update(frame_masks.keys())
-        for frame_masks in overlap_masks_j:
-            objects_j.update(frame_masks.keys())
+        # Phase 1: Deterministic matching for injected objects
+        # Objects injected from chunk_i into chunk_j retain the same IDs,
+        # so any ID present in both chunks is a direct match.
+        injected_ids_j = set(prompt_result_j.get("injected_object_ids", []))
+        if injected_ids_j:
+            set_i = set(object_ids_i)
+            for obj_id in injected_ids_j:
+                if obj_id in set_i and obj_id in object_ids_j:
+                    mappings[obj_id] = obj_id  # Same ID in both chunks
+                    matched_j_ids.add(obj_id)
+                    logger.info(f"            ✅ Injected match: chunk_{chunk_i_id} obj_{obj_id} -> chunk_{chunk_j_id} obj_{obj_id} (deterministic)")
+            
+            if mappings:
+                logger.info(f"          Phase 1: {len(mappings)} deterministic match(es) from injected objects")
         
-        logger.debug(f"          Starting matching for chunk_{chunk_i_id} -> chunk_{chunk_j_id}")
-        logger.debug(f"            Available in chunk_{chunk_i_id} overlap: {sorted(objects_i)}")
-        logger.debug(f"            Available in chunk_{chunk_j_id} overlap: {sorted(objects_j)}")
+        # Phase 2: IoU-based matching for remaining (newly detected) objects
+        remaining_i = [id_i for id_i in object_ids_i if id_i not in mappings]
+        remaining_j = [id_j for id_j in object_ids_j if id_j not in matched_j_ids]
         
-        for id_i in object_ids_i:
-            if id_i not in objects_i:
-                logger.debug(f"            ⚠️  Skipping obj_{id_i} from chunk_{chunk_i_id} - not in overlap region")
-                continue
+        if remaining_i and remaining_j:
+            logger.info(f"          Phase 2: IoU matching for {len(remaining_i)} remaining chunk_i objs vs {len(remaining_j)} chunk_j objs")
             
-            best_iou = 0
-            best_id_j = None
+            # Load overlap frames from PNGs
+            overlap_masks_i = self._load_overlap_frames_from_pngs(chunk_i, prompt, position='end')
+            overlap_masks_j = self._load_overlap_frames_from_pngs(chunk_j, prompt, position='start')
             
-            # Track object_1 specifically for debugging
-            is_debug_object = (chunk_i_id == 0 and id_i == 1)
-            if is_debug_object:
-                logger.info(f"            🔍 TRACKING chunk_0/object_1 across {num_overlap} overlap frame(s)")
+            logger.info(f"          Loaded overlap masks: chunk_{chunk_i_id}={len(overlap_masks_i)} frames, chunk_{chunk_j_id}={len(overlap_masks_j)} frames")
             
-            for id_j in object_ids_j:
-                if id_j in matched_j_ids:  # Already matched
-                    continue
+            if overlap_masks_i and overlap_masks_j:
+                num_overlap = min(len(overlap_masks_i), len(overlap_masks_j))
                 
-                if id_j not in objects_j:
-                    continue
-                
-                # Compute best (maximum) IoU across all overlap frames
-                ious = []
-                for frame_idx in range(num_overlap):
-                    mask_i = overlap_masks_i[frame_idx].get(id_i)
-                    mask_j = overlap_masks_j[frame_idx].get(id_j)
+                for id_i in remaining_i:
+                    best_iou = 0
+                    best_id_j = None
                     
-                    if mask_i is not None and mask_j is not None:
-                        iou = self._compute_iou(mask_i, mask_j)
-                        ious.append(iou)
-                
-                # Best (maximum) IoU across overlap frames
-                best_iou_candidate = max(ious) if ious else 0.0
-                
-                # Extra logging for debug object
-                if is_debug_object and best_iou_candidate > 0:
-                    logger.info(f"              vs chunk_{chunk_j_id}/object_{id_j}: best IoU={best_iou_candidate:.4f} (max over {len(ious)} frames: {[f'{x:.3f}' for x in ious]})")
-                else:
-                    logger.debug(f"              IoU(obj_{id_i}, obj_{id_j}) = {best_iou_candidate:.4f} (max over {len(ious)} frames)")
-                
-                if best_iou_candidate > best_iou:
-                    best_iou = best_iou_candidate
-                    best_id_j = id_j
-            
-            # Keep match if best IoU exceeds threshold  
-            if best_iou > self.iou_threshold:
-                mappings[id_i] = best_id_j
-                matched_j_ids.add(best_id_j)
-                logger.info(f"            ✅ Matched: chunk_{chunk_i_id} obj_{id_i} -> chunk_{chunk_j_id} obj_{best_id_j} (best IoU={best_iou:.3f})")
-            else:
-                if is_debug_object:
-                    logger.info(f"            ❌ NO MATCH for obj_{id_i} (best IoU={best_iou:.4f} < threshold={self.iou_threshold})")
-                else:
-                    logger.debug(f"            No match for obj_{id_i} (best IoU={best_iou:.4f} < threshold={self.iou_threshold})")
+                    for id_j in remaining_j:
+                        if id_j in matched_j_ids:
+                            continue
+                        
+                        # Compute best (maximum) IoU across all overlap frames
+                        ious = []
+                        for frame_idx in range(num_overlap):
+                            mask_i = overlap_masks_i[frame_idx].get(id_i)
+                            mask_j = overlap_masks_j[frame_idx].get(id_j)
+                            
+                            if mask_i is not None and mask_j is not None:
+                                iou = self._compute_iou(mask_i, mask_j)
+                                ious.append(iou)
+                        
+                        best_iou_candidate = max(ious) if ious else 0.0
+                        logger.debug(f"              IoU(obj_{id_i}, obj_{id_j}) = {best_iou_candidate:.4f} (max over {len(ious)} frames)")
+                        
+                        if best_iou_candidate > best_iou:
+                            best_iou = best_iou_candidate
+                            best_id_j = id_j
+                    
+                    if best_iou > self.iou_threshold:
+                        mappings[id_i] = best_id_j
+                        matched_j_ids.add(best_id_j)
+                        logger.info(f"            ✅ IoU match: chunk_{chunk_i_id} obj_{id_i} -> chunk_{chunk_j_id} obj_{best_id_j} (IoU={best_iou:.3f})")
+                    else:
+                        logger.debug(f"            No match for obj_{id_i} (best IoU={best_iou:.4f} < threshold={self.iou_threshold})")
         
         return mappings
     
