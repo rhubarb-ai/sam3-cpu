@@ -309,6 +309,12 @@ def load_video_frames_from_video_file_using_cv2(
     cap.release()
     pbar.close()
 
+    if len(frames) == 0:
+        raise RuntimeError(
+            f"No frames could be decoded from video: {video_path}. "
+            f"The file may be corrupted, empty, or encoded with an unsupported codec."
+        )
+
     # Convert to tensor
     frames_np = np.stack(frames, axis=0).astype(np.float32)  # (T, H, W, C)
     video_tensor = torch.from_numpy(frames_np).permute(0, 3, 1, 2)  # (T, C, H, W)
