@@ -2,7 +2,7 @@ name: Update Version and Tag Release
 on:
   push:
     branches:
-      - []
+      - main
   workflow_dispatch:
 
 jobs:
