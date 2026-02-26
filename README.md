@@ -125,10 +125,39 @@ result = sam3.process_video_with_prompts(
 ### Makefile shortcuts
 
 ```bash
+make help                 # show all available targets
+make setup                # install uv + dependencies
+make test                 # run pytest suite
 make run-all              # run every example
 make run-example EXAMPLE=a
-make test                 # run pytest suite
+
+# CLI tools via make
+make image-prompter IMAGES='assets/images/truck.jpg' PROMPTS='truck wheel'
+make video-prompter VIDEO='assets/videos/tennis_480p.mp4' PROMPTS='person'
+make video-prompter VIDEO='clip.mp4' PROMPTS='player' FRAME_RANGE='100 500'
+make video-prompter VIDEO='clip.mp4' PROMPTS='player' TIME_RANGE='0:05 0:30'
 ```
+
+All `make` variables:
+
+| Variable | Used by | Example |
+|---|---|---|
+| `IMAGES` | `image-prompter` | `'img1.jpg img2.jpg'` |
+| `VIDEO` | `video-prompter` | `'clip.mp4'` |
+| `PROMPTS` | both | `'person car'` |
+| `POINTS` | both | `'320,240 500,300'` |
+| `POINT_LABELS` | both | `'1 0'` |
+| `BBOX` | `image-prompter` | `'100 50 400 300'` |
+| `MASKS` | `video-prompter` | `'mask.png'` |
+| `FRAME_RANGE` | `video-prompter` | `'100 500'` |
+| `TIME_RANGE` | `video-prompter` | `'0:05 0:30'` |
+| `OUTPUT` | both | `'results/demo'` |
+| `ALPHA` | both | `0.45` |
+| `DEVICE` | both | `cpu` or `cuda` |
+| `CHUNK_SPREAD` | `video-prompter` | `even` |
+| `KEEP_TEMP` | `video-prompter` | `1` (any non-empty value) |
+| `VIDEO_RES` | `run-*` examples | `480p`, `720p`, `1080p` |
+| `ARGS` | all | extra flags passed through |
 
 ---
 

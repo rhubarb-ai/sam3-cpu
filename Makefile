@@ -1,6 +1,7 @@
 .PHONY: help setup check-uv install test test-fast test-slow test-image test-video \
         run run-all run-example profile profile-all profile-example clean clean-outputs \
-        clean-cache clean-profile distclean lint format check
+        clean-cache clean-profile distclean lint format check \
+        image-prompter video-prompter linkedin-visuals
 
 # Default target
 .DEFAULT_GOAL := help
@@ -35,6 +36,9 @@ help: ## Show this help message
 	@echo "$(GREEN)Setup:$(NC)"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; /^setup|^check-uv|^install/ {printf "  $(YELLOW)%-20s$(NC) %s\n", $$1, $$2}'
 	@echo ""
+	@echo "$(GREEN)CLI Tools:$(NC)"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; /^image-prompter|^video-prompter|^linkedin/ {printf "  $(YELLOW)%-20s$(NC) %s\n", $$1, $$2}'
+	@echo ""
 	@echo "$(GREEN)Running Examples:$(NC)"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; /^run/ {printf "  $(YELLOW)%-20s$(NC) %s\n", $$1, $$2}'
 	@echo ""
@@ -56,6 +60,8 @@ help: ## Show this help message
 	@echo "  make profile-all                 # Run all with profiling enabled"
 	@echo "  make test-fast                   # Run only fast tests"
 	@echo "  make test ARGS='-v'              # Run tests with verbose output"
+	@echo "  make image-prompter IMAGES='img.jpg' PROMPTS='person car'"
+	@echo "  make video-prompter VIDEO='clip.mp4' PROMPTS='player'"
 
 setup: ## Run setup script to install uv and dependencies
 	@if [ ! -f setup.sh ]; then \
@@ -242,6 +248,58 @@ benchmark: check-uv ## Run performance benchmarks
 			--video assets/videos/Roger-Federer-vs-Rafael-Nadal-Wimbledon-2008_$$res.mp4 \
 			--output $(OUTPUT_DIR)/benchmark_$$res 2>&1 | grep -E "real|user|sys"; \
 	done
+
+# ---------------------------------------------------------------------------
+# CLI Tools
+# ---------------------------------------------------------------------------
+
+image-prompter: check-uv ## Run image_prompter.py (IMAGES, PROMPTS, POINTS, BBOX, ALPHA, DEVICE, OUTPUT)
+	@if [ -z "$(IMAGES)" ]; then \
+		echo "$(RED)Error: IMAGES not specified$(NC)"; \
+		echo "$(YELLOW)Usage: make image-prompter IMAGES='photo.jpg' PROMPTS='person car'$(NC)"; \
+		echo "$(YELLOW)       make image-prompter IMAGES='a.jpg b.jpg' BBOX='100 50 400 300'$(NC)"; \
+		echo "$(YELLOW)       make image-prompter IMAGES='img.jpg' POINTS='320,240' POINT_LABELS='1'$(NC)"; \
+		exit 1; \
+	fi
+	@CMD="$(UV) run $(PYTHON) image_prompter.py --images $(IMAGES)"; \
+	if [ -n "$(PROMPTS)" ]; then CMD="$$CMD --prompts $(PROMPTS)"; fi; \
+	if [ -n "$(POINTS)" ]; then CMD="$$CMD --points $(POINTS)"; fi; \
+	if [ -n "$(POINT_LABELS)" ]; then CMD="$$CMD --point-labels $(POINT_LABELS)"; fi; \
+	if [ -n "$(BBOX)" ]; then CMD="$$CMD --bbox $(BBOX)"; fi; \
+	if [ -n "$(ALPHA)" ]; then CMD="$$CMD --alpha $(ALPHA)"; fi; \
+	if [ -n "$(DEVICE)" ]; then CMD="$$CMD --device $(DEVICE)"; fi; \
+	if [ -n "$(OUTPUT)" ]; then CMD="$$CMD --output $(OUTPUT)"; else CMD="$$CMD --output $(OUTPUT_DIR)"; fi; \
+	echo "$(BLUE)Running image_prompter...$(NC)"; \
+	$$CMD $(ARGS)
+
+video-prompter: check-uv ## Run video_prompter.py (VIDEO, PROMPTS, POINTS, MASKS, ALPHA, DEVICE, OUTPUT, ...)
+	@if [ -z "$(VIDEO)" ]; then \
+		echo "$(RED)Error: VIDEO not specified$(NC)"; \
+		echo "$(YELLOW)Usage: make video-prompter VIDEO='clip.mp4' PROMPTS='person ball'$(NC)"; \
+		echo "$(YELLOW)       make video-prompter VIDEO='clip.mp4' PROMPTS='player' FRAME_RANGE='100 500'$(NC)"; \
+		echo "$(YELLOW)       make video-prompter VIDEO='clip.mp4' PROMPTS='player' TIME_RANGE='0:05 0:30'$(NC)"; \
+		echo "$(YELLOW)       make video-prompter VIDEO='clip.mp4' MASKS='mask.png'$(NC)"; \
+		exit 1; \
+	fi
+	@CMD="$(UV) run $(PYTHON) video_prompter.py --video $(VIDEO)"; \
+	if [ -n "$(PROMPTS)" ]; then CMD="$$CMD --prompts $(PROMPTS)"; fi; \
+	if [ -n "$(POINTS)" ]; then CMD="$$CMD --points $(POINTS)"; fi; \
+	if [ -n "$(POINT_LABELS)" ]; then CMD="$$CMD --point-labels $(POINT_LABELS)"; fi; \
+	if [ -n "$(MASKS)" ]; then CMD="$$CMD --masks $(MASKS)"; fi; \
+	if [ -n "$(ALPHA)" ]; then CMD="$$CMD --alpha $(ALPHA)"; fi; \
+	if [ -n "$(DEVICE)" ]; then CMD="$$CMD --device $(DEVICE)"; fi; \
+	if [ -n "$(CHUNK_SPREAD)" ]; then CMD="$$CMD --chunk-spread $(CHUNK_SPREAD)"; fi; \
+	if [ -n "$(FRAME_RANGE)" ]; then CMD="$$CMD --frame-range $(FRAME_RANGE)"; fi; \
+	if [ -n "$(TIME_RANGE)" ]; then CMD="$$CMD --time-range $(TIME_RANGE)"; fi; \
+	if [ -n "$(KEEP_TEMP)" ]; then CMD="$$CMD --keep-temp"; fi; \
+	if [ -n "$(OUTPUT)" ]; then CMD="$$CMD --output $(OUTPUT)"; else CMD="$$CMD --output $(OUTPUT_DIR)"; fi; \
+	echo "$(BLUE)Running video_prompter...$(NC)"; \
+	$$CMD $(ARGS)
+
+linkedin-visuals: check-uv ## Generate LinkedIn visuals from processed results
+	@echo "$(BLUE)Generating LinkedIn visuals...$(NC)"
+	$(UV) run $(PYTHON) scripts/create_linkedin_visuals.py
+	@echo "$(GREEN)✓ Visuals saved to results/linkedin/$(NC)"
 
 info: ## Display project information
 	@echo "$(BLUE)SAM3 CPU Project Information$(NC)"
