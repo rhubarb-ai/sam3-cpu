@@ -296,11 +296,6 @@ video-prompter: check-uv ## Run video_prompter.py (VIDEO, PROMPTS, POINTS, MASKS
 	echo "$(BLUE)Running video_prompter...$(NC)"; \
 	$$CMD $(ARGS)
 
-linkedin-visuals: check-uv ## Generate LinkedIn visuals from processed results
-	@echo "$(BLUE)Generating LinkedIn visuals...$(NC)"
-	$(UV) run $(PYTHON) scripts/create_linkedin_visuals.py
-	@echo "$(GREEN)✓ Visuals saved to results/linkedin/$(NC)"
-
 info: ## Display project information
 	@echo "$(BLUE)SAM3 CPU Project Information$(NC)"
 	@echo ""
