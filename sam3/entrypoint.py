@@ -1,5 +1,8 @@
 """
-SAM3 Entrypoint Module
+SAM3 Entrypoint Module (Deprecated)
+
+.. deprecated::
+    Use ``sam3.api.Sam3API`` instead. This module is kept for backward compatibility.
 
 High-level API for SAM3 image and video segmentation with automatic memory management,
 chunking, and output generation. This module provides a unified interface for all
@@ -47,7 +50,7 @@ from sam3.__globals import (
     DEFAULT_PROPAGATION_DIRECTION,
     DEFAULT_NUM_WORKERS
 )
-from sam3.logger import get_logger
+from sam3.utils.logger import get_logger
 from sam3.drivers import Sam3ImageDriver, Sam3VideoDriver
 
 logger = get_logger(__name__)

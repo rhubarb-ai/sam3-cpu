@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from sam3.drivers import Sam3ImageDriver, Sam3VideoDriver
-from sam3.logger import get_logger
+from sam3.utils.logger import get_logger
 from sam3.__globals import (
     BPE_PATH,
     DEVICE, 

@@ -2,7 +2,7 @@ import torch
 import os
 import sys
 import sam3
-from sam3.logger import get_logger, LOG_LEVELS
+from sam3.utils.logger import get_logger, LOG_LEVELS
 
 os.environ["OPENCV_FFMPEG_READ_ATTEMPTS"] = "10000"
 
@@ -28,7 +28,7 @@ SAM3_ROOT = os.path.join(os.path.dirname(sam3.__file__))
 BPE_PATH = os.path.join(SAM3_ROOT, "assets/bpe_simple_vocab_16e6.txt.gz")
 
 # Video processing defaults
-DEFAULT_MIN_VIDEO_FRAMES = 15
+DEFAULT_MIN_VIDEO_FRAMES = 25
 DEFAULT_MIN_CHUNK_OVERLAP = 5
 
 SUPPORTED_VIDEO_FORMATS = ('.mp4', '.avi', '.mov', '.mkv')
@@ -39,7 +39,7 @@ VIDEO_INFERENCE_MB = 6900
 TENSOR_SIZE_BYTES = 1008*1008*3*4 # Approximate size of a 1008x1008 RGB tensor in bytes
 
 # Memory usage for chunking (percentage of available memory to use)
-RAM_USAGE_PERCENT = 0.01   # Use 5% of available RAM for CPU video chunking (conservative)
+RAM_USAGE_PERCENT = 0.45   # Use 45% of available RAM for CPU video chunking (conservative)
 # RAM_USAGE_PERCENT = 0.65   # Use 65% of available RAM for CPU video chunking (conservative)
 VRAM_USAGE_PERCENT = 0.65  # Use 65% of available VRAM for GPU video chunking (aggressive, GPU memory is dedicated)
 

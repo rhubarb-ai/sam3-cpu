@@ -14,9 +14,9 @@ import torch
 from PIL import Image
 
 from sam3.drivers import Sam3ImageDriver
-from sam3.logger import get_logger
+from sam3.utils.logger import get_logger
 from sam3.__globals import BPE_PATH, DEFAULT_NUM_WORKERS
-from sam3.utils import sanitize_filename
+from sam3.utils.helpers import sanitize_filename
 
 logger = get_logger(__name__)
 

@@ -10,7 +10,7 @@ Usage:
 import sys
 import time
 import sam3.__globals
-from sam3.profiler import profile
+from sam3.utils.profiler import profile
 
 # Check for --profile flag
 if '--profile' in sys.argv:

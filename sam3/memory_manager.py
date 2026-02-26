@@ -6,8 +6,8 @@ import math
 from typing import Literal
 import psutil
 from pathlib import Path
-from sam3.ffmpeglib import ffmpeg_lib
-from sam3.utils import ram_stat, vram_stat
+from sam3.utils.ffmpeglib import ffmpeg_lib
+from sam3.utils.helpers import ram_stat, vram_stat
 from sam3.__globals import (
     logger,
     DEVICE, 

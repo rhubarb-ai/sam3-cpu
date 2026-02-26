@@ -10,9 +10,9 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from sam3.logger import get_logger
+from sam3.utils.logger import get_logger
 from sam3.memory_manager import memory_manager
-from sam3.ffmpeglib import ffmpeg_lib
+from sam3.utils.ffmpeglib import ffmpeg_lib
 from sam3.postprocessor import VideoPostProcessor
 from sam3.__globals import (
     BPE_PATH,
@@ -20,7 +20,7 @@ from sam3.__globals import (
     DEFAULT_PROPAGATION_DIRECTION,
     TEMP_DIR
 )
-from sam3.utils import sanitize_filename
+from sam3.utils.helpers import sanitize_filename
 
 logger = get_logger(__name__)
 

@@ -14,7 +14,7 @@ import numpy as np
 from pathlib import Path
 
 from sam3.postprocessor import VideoPostProcessor
-from sam3.logger import get_logger
+from sam3.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

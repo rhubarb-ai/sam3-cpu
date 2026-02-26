@@ -1,3 +1,11 @@
+"""Deprecated: Use sam3.api.Sam3API instead."""
+import warnings
+warnings.warn(
+    "sam3.entry.Sam3Entry is deprecated. Use sam3.api.Sam3API instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
@@ -5,8 +13,8 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 import cv2
 import numpy as np
 from sam3.drivers import Sam3ImageDriver, Sam3VideoDriver
-from sam3.ffmpeglib import ffmpeg_lib
-from sam3.logger import get_logger
+from sam3.utils.ffmpeglib import ffmpeg_lib
+from sam3.utils.logger import get_logger
 from sam3.memory_manager import memory_manager
 from sam3.__globals import (
     BPE_PATH,

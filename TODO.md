@@ -48,7 +48,8 @@
     -- This script is the best example how chunked videos can be processed: notebook/video_chunked_predictor.example.ipynb utilise this at the best.
     -- Multiple text prompts can go into the loop while I think others can be processed simultaneously. 
     -- All intermediate data including masks and metadata should be first stored inside TEMP_DIR/[video_name]/ (there are scripts that can guide how the structures are there)
-    -- Masks are intially saved as images in the temp folder but when we move temp to output folder then I think we convert the masks into video with the same video metadata as input.
+    -- Masks are intially saved as images in the temp folder but when we move temp to output folder then I think we convert the masks into video with the same video metadata as input. We just remove the redundant frame from the starting of the next chunks.
+    -- Stitch the (after removing redundant frames) mask videos together and then also overlay on the original video as a separate final output.
 
 -- Simplify the README.md and also add the line that hugging face account would be needed to download checkpoints from the HF (you can check this original sam3 repo for reference btw: https://github.com/facebookresearch/sam3)
 

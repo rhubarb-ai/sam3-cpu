@@ -11,9 +11,9 @@ import numpy as np
 from typing_extensions import Literal
 import torch
 from sam3.model.box_ops import box_xywh_to_cxcywh
-from sam3.profiler import profile
+from sam3.utils.profiler import profile
 from sam3.__globals import DEVICE, BPE_PATH
-from sam3.logger import get_logger
+from sam3.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -259,7 +259,7 @@ class Sam3ImageDriver:
             >>> state = driver.prompt_bounding_box(image, processor, state, box)
         """
         from sam3.model.box_ops import box_xywh_to_cxcywh
-        from sam3.visualization_utils import normalize_bbox
+        from sam3.utils.visualization import normalize_bbox
 
         # Load image if path provided
         if isinstance(image, str):
@@ -319,7 +319,7 @@ class Sam3ImageDriver:
             the segmentation, while negative labels (0) exclude regions.
         """
         from sam3.model.box_ops import box_xywh_to_cxcywh
-        from sam3.visualization_utils import normalize_bbox
+        from sam3.utils.visualization import normalize_bbox
 
         # Load image if path provided
         if isinstance(image, str):

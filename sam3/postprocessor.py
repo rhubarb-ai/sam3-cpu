@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from sam3.logger import get_logger
+from sam3.utils.logger import get_logger
 from sam3.__globals import (
     CHUNK_MASK_MATCHING_IOU_THRESHOLD,
     DEFAULT_MIN_CHUNK_OVERLAP
@@ -668,7 +668,7 @@ class VideoPostProcessor:
             prompt_mappings: Chunk-pair mappings for this prompt.
                            Format: {chunk_pair: {j_id: i_id}}
         """
-        from sam3.utils import sanitize_filename
+        from sam3.utils.helpers import sanitize_filename
         
         safe_prompt = sanitize_filename(prompt)
         prompt_output_dir = self.masks_output_dir / safe_prompt

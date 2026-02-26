@@ -16,7 +16,7 @@ from typing import List, Optional
 
 import psutil
 import torch
-from sam3.logger import get_logger
+from sam3.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

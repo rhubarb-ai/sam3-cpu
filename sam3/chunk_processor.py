@@ -14,9 +14,9 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from sam3.logger import get_logger
+from sam3.utils.logger import get_logger
 from sam3.__globals import DEFAULT_PROPAGATION_DIRECTION, DEFAULT_MIN_CHUNK_OVERLAP
-from sam3.utils import sanitize_filename
+from sam3.utils.helpers import sanitize_filename
 
 logger = get_logger(__name__)
 

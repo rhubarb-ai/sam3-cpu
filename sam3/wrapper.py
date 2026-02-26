@@ -13,7 +13,15 @@ from typing import Optional, Dict, List, Union, Any
 from dataclasses import dataclass, asdict
 
 from sam3.entrypoint import Sam3Entrypoint, ProcessingResult
-from sam3.logger import get_logger
+"""Deprecated: Use sam3.api.Sam3API instead."""
+import warnings
+warnings.warn(
+    "sam3.wrapper.Sam3Wrapper is deprecated. Use sam3.api.Sam3API instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+from sam3.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
