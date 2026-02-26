@@ -29,9 +29,13 @@
 - [Python API](#python-api)
 - [Video Chunking](#video-chunking)
 - [Output Structure](#output-structure)
+- [Profiling](#profiling)
 - [Configuration](#configuration)
 - [Project Structure](#project-structure)
 - [Testing](#testing)
+- [Known Limitations](#known-limitations)
+- [Contributing](#contributing)
+- [Future Work](#future-work)
 - [Citation](#citation)
 - [License](#license)
 - [Contact](#contact)
@@ -418,6 +422,101 @@ The top-level `metadata.json` also includes:
 
 ---
 
+## Profiling
+
+SAM3-CPU ships with a built-in **profiler** that measures wall-clock **execution
+time** and **memory consumption** (RSS) for any decorated function.  This is
+valuable for:
+
+- Identifying bottlenecks (model loading vs. inference vs. post-processing)
+- Tracking memory growth across processing stages
+- Comparing CPU vs. GPU performance
+- Validating that optimisations have the intended effect
+
+### Enabling the profiler
+
+The profiler is **disabled by default** (zero overhead).  Enable it by passing
+the `--profile` flag to any script:
+
+```bash
+# Profile image segmentation
+uv run python image_prompter.py \
+    --images assets/images/truck.jpg --prompts truck --profile
+
+# Profile video segmentation
+uv run python video_prompter.py \
+    --video clip.mp4 --prompts person --profile
+```
+
+Or toggle it programmatically:
+
+```python
+import sam3.__globals
+sam3.__globals.ENABLE_PROFILING = True
+```
+
+### Using `@profile()` in your own code
+
+```python
+from sam3.utils.profiler import profile
+
+@profile()
+def my_heavy_function():
+    # ... expensive work ...
+    return result
+```
+
+When profiling is enabled each decorated call prints a summary:
+
+```
+[PROFILED] my_heavy_function | Time: 3.142857s | Memory Used: 128.000000 MB
+```
+
+### Output files
+
+Results are appended to two files in the working directory:
+
+| File | Format | Content |
+|---|---|---|
+| `profile_results.json` | JSON array | One object per call with `function_name`, `timestamp`, `execution_time_seconds`, `memory_used_MB`, `total_process_memory_MB` |
+| `profile_results.txt` | Plain text | One line per call — human-readable summary |
+
+**Example `profile_results.json`:**
+
+```json
+[
+    {
+        "function_name": "_build_model",
+        "timestamp": "2026-02-16T21:07:27.912279",
+        "execution_time_seconds": 6.283576,
+        "memory_used_MB": 6750.577,
+        "total_process_memory_MB": 7515.546
+    },
+    {
+        "function_name": "inference",
+        "timestamp": "2026-02-16T21:07:33.132962",
+        "execution_time_seconds": 5.214927,
+        "memory_used_MB": 51.323,
+        "total_process_memory_MB": 7566.967
+    }
+]
+```
+
+**Example `profile_results.txt`:**
+
+```
+_build_model | Time: 6.283576 s | Memory Used: 6750.577 MB | Total Memory: 7515.546 MB
+inference    | Time: 5.214927 s | Memory Used: 51.323 MB  | Total Memory: 7566.967 MB
+```
+
+A standalone demo is available at `examples/profiler_example.py`:
+
+```bash
+uv run python examples/profiler_example.py --profile
+```
+
+---
+
 ## Configuration
 
 Runtime defaults live in `config.json` (loaded at startup) and compile-time
@@ -480,13 +579,135 @@ sam3-cpu/
 
 ## Testing
 
+The test suite lives in `tests/` and uses **pytest**.  Tests are designed to run
+**without the SAM3 model** — they exercise helper functions, IoU logic,
+stitching, and metadata generation using synthetic data.
+
+### Test files
+
+| File | What it covers |
+|---|---|
+| `test_iou_matching.py` | IoU computation, mask matching between chunks |
+| `test_cross_chunk.py` | Cross-chunk ID remapping and continuity |
+| `test_video_prompter.py` | Video prompter helpers — stitching, overlay, timestamp parsing, range resolution, object tracking |
+| `test_all_scenarios.py` | End-to-end scenarios (requires model + assets — skipped when unavailable) |
+| `conftest.py` | Shared fixtures: asset paths, temp directories, markers |
+
+### Running tests
+
 ```bash
-# Run the full suite
+# Full suite
 uv run python -m pytest tests/ -v
 
-# Run a specific file
-uv run python -m pytest tests/test_iou_matching.py -v
+# Single file
+uv run python -m pytest tests/test_video_prompter.py -v
+
+# Single test class or method
+uv run python -m pytest tests/test_video_prompter.py::TestParseTimestamp -v
+uv run python -m pytest tests/test_video_prompter.py::TestBuildObjectTracking::test_frame_offset -v
+
+# Skip slow / model-dependent tests
+uv run python -m pytest tests/ -v -m "not slow"
 ```
+
+### Injecting your own test data
+
+The unit tests create **synthetic videos and masks** on-the-fly (via OpenCV), so
+no real assets are needed.  To test with your own data:
+
+1. **Add assets** — place images in `assets/images/` and videos in
+   `assets/videos/`.  The fixtures in `conftest.py` will pick them up.
+2. **Write a fixture** — add a new `@pytest.fixture` in `conftest.py` that
+   points to your file:
+    ```python
+    @pytest.fixture(scope="session")
+    def my_custom_video(assets_dir):
+        path = assets_dir / "videos" / "my_clip.mp4"
+        if not path.exists():
+            pytest.skip(f"Custom video not found: {path}")
+        return str(path)
+    ```
+3. **Use the fixture** in your test function:
+    ```python
+    def test_my_clip(my_custom_video, temp_output_dir):
+        # run processing and assert on results
+        ...
+    ```
+
+Available markers: `@pytest.mark.slow`, `@pytest.mark.gpu`,
+`@pytest.mark.image`, `@pytest.mark.video`.
+
+---
+
+## Known Limitations
+
+- **Cross-chunk object ID reassignment** — Videos are processed in memory-sized
+  chunks.  Object IDs are kept consistent across chunk boundaries using
+  IoU-based mask matching.  However, if an object **disappears in the middle of
+  a chunk** and **reappears in a later chunk** with no overlapping mask in the
+  boundary region, it will be assigned a **new ID**.  The same real-world object
+  may therefore be counted multiple times in the tracking metadata.  This is an
+  inherent trade-off of chunk-based processing without a global re-identification
+  step.
+
+- **CPU inference speed** — Running the full SAM 3 model on CPU is
+  significantly slower than GPU.  Use `--frame-range` / `--time-range` to
+  process only the segment you need, or consider GPU acceleration for
+  production workloads.
+
+- **macOS / Windows support** — The project is tested primarily on Linux.
+  macOS works for most workflows but may have edge-case differences with
+  ffmpeg builds.  Windows support is not yet validated (see
+  [Future Work](#future-work)).
+
+---
+
+## Contributing
+
+Contributions are welcome!  Whether it's a bug fix, a new feature, or improved
+documentation — we'd love your input.
+
+### How to contribute
+
+1. **Fork** the repository on GitHub.
+2. **Create a feature branch** from `main`:
+   ```bash
+   git checkout -b feature/my-improvement
+   ```
+3. **Make your changes** and add tests where appropriate.
+4. **Open a Pull Request** against `main` with a clear description of the
+   change and its motivation.
+
+### Becoming a contributor / maintainer
+
+If you'd like to be added as a regular contributor or maintainer, please
+[open a GitHub Issue](https://github.com/rhubarb-ai/sam3-cpu/issues/new)
+with the title **"Contributor request"** and a brief description of your
+background and intended contributions.  GitHub Issues are the preferred
+channel for all project-level discussions.
+
+### Guidelines
+
+- Follow existing code style and conventions.
+- Keep PRs focused — one logical change per PR.
+- Ensure `uv run python -m pytest tests/ -v` passes before submitting.
+- Update documentation (especially this README) for user-facing changes.
+
+---
+
+## Future Work
+
+- **Docker support** — Provide a `Dockerfile` + `docker-compose.yml` for
+  reproducible, one-command deployment.
+- **Full macOS compatibility** — Validate and fix edge cases on Intel and
+  Apple Silicon Macs.
+- **Windows compatibility** — Test and adapt for native Windows and WSL
+  environments.
+- **Performance optimisation** — Further speed-up through model quantisation,
+  batched inference, and frame-level parallelism to reduce wall-clock time
+  on CPU.
+- **CI/CD pipeline** — GitHub Actions for automated testing, linting, and
+  release packaging.
 
 ---
 
