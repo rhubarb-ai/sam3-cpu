@@ -748,7 +748,7 @@ the original SAM 3 paper and this repository.
 @misc{aparajeya2026sam3cpu,
     title  = {SAM3-CPU: Segment Anything with Concepts — CPU-compatible
               inference with memory-aware chunking},
-    author = {Prashant Aparajeya},
+    author = {Prashant Aparajeya, Ankuj Arora},
     year   = {2026},
     url    = {https://github.com/rhubarb-ai/sam3-cpu},
 }
@@ -767,5 +767,11 @@ The underlying SAM 3 model weights are subject to Meta's [SAM License](https://g
 ## Contact
 
 **Dr Prashant Aparajeya**
-Email: p.aparajeya@aisimply.uk
+Email: p.aparajeya@gmail.com
 GitHub: [rhubarb-ai/sam3-cpu](https://github.com/rhubarb-ai/sam3-cpu)
+Github Profile: [paparajeya](https://github.com/paparajeya)
+
+**Dr Ankuj Arora**
+Email: ankujarora@gmail.com
+GitHub: [rhubarb-ai/sam3-cpu](https://github.com/rhubarb-ai/sam3-cpu)
+Github Profile: [ankuj](https://github.com/ankuj)

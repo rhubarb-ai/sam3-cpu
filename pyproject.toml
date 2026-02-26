@@ -10,7 +10,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = {file = "LICENSE"}
 authors = [
-  { name = "Dr Prashant Aparajeya", email = "p.aparajeya@aisimply.uk" },
+  { name = "Dr Prashant Aparajeya", email = "p.aparajeya@gmail.com" },
+  { name = "Dr Ankuj Arora", email = "ankujarora@gmail.com" },
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
