@@ -17,6 +17,11 @@ Usage:
     # Mask image as prompt
     python video_prompter.py --video clip.mp4 --masks mask.png
 
+    # Process a specific segment (frames or time)
+    python video_prompter.py --video clip.mp4 --prompts player --frame-range 100 500
+    python video_prompter.py --video clip.mp4 --prompts player --time-range 4.0 20.0
+    python video_prompter.py --video clip.mp4 --prompts player --time-range 00:01:30 00:03:00
+
     # Custom options
     python video_prompter.py --video clip.mp4 --prompts player \\
         --output results/match --alpha 0.4 --device cpu --keep-temp
@@ -24,11 +29,12 @@ Usage:
 
 import argparse
 import json
+import re
 import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -60,6 +66,64 @@ def _table(rows: List[List[str]]):
         if i == 0:
             print(sep)
     print(sep)
+
+
+# ---------------------------------------------------------------------------
+# Time / frame range parsing
+# ---------------------------------------------------------------------------
+
+def _parse_timestamp(value: str) -> float:
+    """Parse a timestamp string to seconds.
+
+    Accepts:
+        - Plain float/int:  "4.5"  -> 4.5
+        - MM:SS:            "1:30" -> 90.0
+        - HH:MM:SS:        "0:01:30" -> 90.0
+    """
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    parts = value.split(":")
+    if len(parts) == 2:
+        m, s = parts
+        return int(m) * 60 + float(s)
+    if len(parts) == 3:
+        h, m, s = parts
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    raise ValueError(f"Cannot parse timestamp: '{value}'")
+
+
+def _resolve_range(
+    video_path: Path,
+    frame_range: Optional[Tuple[int, int]],
+    time_range: Optional[Tuple[str, str]],
+) -> Optional[Tuple[int, int]]:
+    """Convert frame_range or time_range to an (start_frame, end_frame) tuple.
+
+    Returns *None* when the full video should be processed.
+    """
+    if frame_range is not None:
+        return (frame_range[0], frame_range[1])
+    if time_range is not None:
+        from sam3.utils.ffmpeglib import ffmpeg_lib
+        info = ffmpeg_lib.get_video_info(str(video_path))
+        fps = info["fps"]
+        start_sec = _parse_timestamp(time_range[0])
+        end_sec = _parse_timestamp(time_range[1])
+        return (int(start_sec * fps), min(int(end_sec * fps), info["nb_frames"] - 1))
+    return None
+
+
+def _extract_subclip(
+    video_path: Path, start_frame: int, end_frame: int, temp_dir: Path
+) -> Path:
+    """Extract a sub-clip from *video_path* covering [start_frame, end_frame]."""
+    from sam3.utils.ffmpeglib import ffmpeg_lib
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    out = temp_dir / f"subclip_{start_frame}_{end_frame}.mp4"
+    ffmpeg_lib.create_video_chunk(str(video_path), str(out), start_frame, end_frame)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +395,8 @@ def _stitch_masks_to_video(
     """Stitch per-chunk PNG masks into per-object mask videos."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    black = np.zeros((height, width), dtype=np.uint8)
+
     for oid in sorted(object_ids):
         out_path = output_dir / f"object_{oid}_mask.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -338,13 +404,17 @@ def _stitch_masks_to_video(
 
         for ci, cinfo in enumerate(chunk_infos):
             chunk_id = cinfo["chunk"]
+            skip = overlap if ci > 0 else 0
             obj_mask_dir = (
                 chunks_dir / f"chunk_{chunk_id}" / "masks" / prompt_name / f"object_{oid}"
             )
             if not obj_mask_dir.exists():
+                # Object not present in this chunk — write black frames
+                chunk_len = cinfo["end"] - cinfo["start"] + 1
+                for _ in range(chunk_len - skip):
+                    writer.write(black)
                 continue
             pngs = sorted(obj_mask_dir.glob("frame_*.png"))
-            skip = overlap if ci > 0 else 0
             for png in pngs[skip:]:
                 frame = cv2.imread(str(png), cv2.IMREAD_GRAYSCALE)
                 if frame is not None:
@@ -405,6 +475,105 @@ def _create_overlay_video(
 
 
 # ---------------------------------------------------------------------------
+# Per-object tracking metadata
+# ---------------------------------------------------------------------------
+
+def _build_object_tracking(
+    mask_dir: Path,
+    object_ids: set,
+    fps: float,
+    frame_offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """Scan stitched mask videos and compute per-object presence info.
+
+    For each object, determines the first and last frame where the mask is
+    non-empty (>= 1 % of pixels active) and translates to timestamps.
+
+    Args:
+        mask_dir: Directory containing ``object_{id}_mask.mp4`` files.
+        object_ids: Set of global object IDs to scan.
+        fps: Video FPS (used for timestamp conversion).
+        frame_offset: If a sub-clip was extracted, offset added to frame
+            numbers so they refer to the *original* video's timeline.
+
+    Returns:
+        List of dicts, one per object, sorted by object ID.
+    """
+    tracking: List[Dict[str, Any]] = []
+    area_threshold = 0.01  # 1 % of frame area
+
+    for oid in sorted(object_ids):
+        mp4 = mask_dir / f"object_{oid}_mask.mp4"
+        if not mp4.exists():
+            tracking.append({
+                "object_id": oid,
+                "first_frame": None,
+                "last_frame": None,
+                "total_frames_active": 0,
+            })
+            continue
+
+        cap = cv2.VideoCapture(str(mp4))
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_pixels = max(w * h, 1)
+
+        first_frame = None
+        last_frame = None
+        active_count = 0
+
+        for fidx in range(total):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if frame.ndim == 3:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            active = (frame > 127).sum()
+            if active / total_pixels >= area_threshold:
+                if first_frame is None:
+                    first_frame = fidx
+                last_frame = fidx
+                active_count += 1
+
+        cap.release()
+
+        # Translate to original-video coordinates
+        abs_first = (first_frame + frame_offset) if first_frame is not None else None
+        abs_last = (last_frame + frame_offset) if last_frame is not None else None
+
+        entry: Dict[str, Any] = {
+            "object_id": oid,
+            "first_frame": abs_first,
+            "last_frame": abs_last,
+            "total_frames_active": active_count,
+            "total_frames": total,
+        }
+        if abs_first is not None:
+            entry["first_timestamp"] = round(abs_first / fps, 3)
+            entry["last_timestamp"] = round(abs_last / fps, 3)
+            entry["duration_s"] = round((abs_last - abs_first + 1) / fps, 3)
+
+            def _ts(sec: float) -> str:
+                m, s = divmod(sec, 60)
+                h, m = divmod(int(m), 60)
+                return f"{h:02d}:{int(m):02d}:{s:06.3f}"
+
+            entry["first_timecode"] = _ts(abs_first / fps)
+            entry["last_timecode"] = _ts(abs_last / fps)
+        else:
+            entry["first_timestamp"] = None
+            entry["last_timestamp"] = None
+            entry["duration_s"] = 0.0
+            entry["first_timecode"] = None
+            entry["last_timecode"] = None
+
+        tracking.append(entry)
+
+    return tracking
+
+
+# ---------------------------------------------------------------------------
 # Main processing pipeline
 # ---------------------------------------------------------------------------
 
@@ -419,6 +588,8 @@ def _process_video(
     alpha: float,
     chunk_spread: str,
     keep_temp: bool,
+    frame_range: Optional[Tuple[int, int]] = None,
+    time_range: Optional[Tuple[str, str]] = None,
 ):
     """Full video processing pipeline."""
     from sam3.utils.ffmpeglib import ffmpeg_lib
@@ -426,6 +597,18 @@ def _process_video(
     from sam3.__globals import TEMP_DIR, DEFAULT_MIN_CHUNK_OVERLAP
 
     video_name = video_path.stem
+
+    # ----- Resolve range & extract sub-clip if needed -----
+    resolved = _resolve_range(video_path, frame_range, time_range)
+    original_video = video_path
+    frame_offset = 0  # offset into the original video for metadata
+    if resolved is not None:
+        sf, ef = resolved
+        frame_offset = sf
+        print(f"Extracting segment: frames {sf}–{ef} ...")
+        temp_subclip_dir = Path(TEMP_DIR) / video_name / "subclip"
+        video_path = _extract_subclip(original_video, sf, ef, temp_subclip_dir)
+        print(f"  Sub-clip: {video_path}  ({ef - sf + 1} frames)\n")
 
     # ----- Memory check -----
     mem_info = _validate_video_memory(video_path, device)
@@ -713,6 +896,9 @@ Examples:
   python video_prompter.py --video clip.mp4 --points 320,240 --point-labels 1
   python video_prompter.py --video clip.mp4 --masks mask.png
   python video_prompter.py --video clip.mp4 --prompts player --device cpu --keep-temp
+  python video_prompter.py --video clip.mp4 --prompts player --frame-range 100 500
+  python video_prompter.py --video clip.mp4 --prompts player --time-range 0:05 0:30
+  python video_prompter.py --video clip.mp4 --prompts player --time-range 10.0 45.5
         """,
     )
 
@@ -750,8 +936,21 @@ Examples:
         "--keep-temp", action="store_true",
         help="Preserve intermediate chunk files in output",
     )
+    parser.add_argument(
+        "--frame-range", nargs=2, type=int, metavar=("START", "END"),
+        help="Process only frames START..END (0-based, inclusive)",
+    )
+    parser.add_argument(
+        "--time-range", nargs=2, type=str, metavar=("START", "END"),
+        help="Process a time segment (seconds, MM:SS, or HH:MM:SS)",
+    )
 
     args = parser.parse_args()
+
+    # Validate: frame-range and time-range are mutually exclusive
+    if args.frame_range and args.time_range:
+        print("\033[91m✗ --frame-range and --time-range are mutually exclusive.\033[0m")
+        sys.exit(1)
 
     # Validate: at least one prompt type
     if not args.prompts and not args.points and not args.masks:
@@ -805,6 +1004,10 @@ Examples:
         print(f"  Points  : {points}")
     if mask_paths:
         print(f"  Masks   : {[m.name for m in mask_paths]}")
+    if args.frame_range:
+        print(f"  Frames  : {args.frame_range[0]}–{args.frame_range[1]}")
+    if args.time_range:
+        print(f"  Time    : {args.time_range[0]} → {args.time_range[1]}")
     print(f"  Device  : {device}")
     print(f"  Output  : {args.output}")
     print(f"  Alpha   : {args.alpha}")
@@ -823,6 +1026,8 @@ Examples:
         alpha=args.alpha,
         chunk_spread=args.chunk_spread,
         keep_temp=args.keep_temp,
+        frame_range=tuple(args.frame_range) if args.frame_range else None,
+        time_range=tuple(args.time_range) if args.time_range else None,
     )
 
 

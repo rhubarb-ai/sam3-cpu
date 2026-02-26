@@ -12,6 +12,8 @@
 - **Memory-aware chunking** — automatically splits long videos into chunks sized to available RAM / VRAM
 - **Cross-chunk continuity** — IoU-based mask remapping keeps object IDs consistent across chunks
 - **Text, point, box & mask prompts** — unified API for all prompt types
+- **Video segment processing** — process a specific frame range or time range instead of the full video
+- **Per-object tracking metadata** — frame ranges, timestamps, and timecodes for every detected object
 - **CLI tools** — `image_prompter.py` and `video_prompter.py` for quick experiments
 
 ---
@@ -22,8 +24,11 @@
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [CLI Tools](#cli-tools)
+  - [image\_prompter.py](#image_prompterpy)
+  - [video\_prompter.py](#video_prompterpy)
 - [Python API](#python-api)
 - [Video Chunking](#video-chunking)
+- [Output Structure](#output-structure)
 - [Configuration](#configuration)
 - [Project Structure](#project-structure)
 - [Testing](#testing)
@@ -128,16 +133,35 @@ make test                 # run pytest suite
 Two standalone scripts provide a quick way to run segmentation from the terminal
 without writing Python code.
 
-### image_prompter.py
+### image\_prompter.py
+
+Segment one or more images with text prompts, click points, or bounding boxes.
+
+#### Options
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--images` | `str+` | *(required)* | One or more image file paths |
+| `--prompts` | `str+` | `None` | Text prompts (e.g. `person car`) |
+| `--points` | `str+` | `None` | Click points as `x,y` pairs (e.g. `320,240 500,300`) |
+| `--point-labels` | `int+` | all `1` | Labels for each point (`1` = positive, `0` = negative) |
+| `--bbox` | `float+` | `None` | Bounding box(es) as `x y w h` (multiples of 4 for several boxes) |
+| `--output` | `str` | `results` | Output directory |
+| `--alpha` | `float` | `0.5` | Overlay alpha for mask visualisation (`0.0`–`1.0`) |
+| `--device` | `str` | auto | Force `cpu` or `cuda` (auto-detected if omitted) |
+
+At least one of `--prompts`, `--points`, or `--bbox` is required.
+
+#### Examples
 
 ```bash
-# Text prompt
+# Text prompt — segment truck and wheels
 uv run python image_prompter.py \
     --images assets/images/truck.jpg \
     --prompts "truck" "wheel" \
     --output results/truck_demo
 
-# Bounding-box prompt
+# Bounding-box prompt — segment inside a rectangle
 uv run python image_prompter.py \
     --images assets/images/truck.jpg \
     --bbox 100 50 400 300 \
@@ -148,26 +172,105 @@ uv run python image_prompter.py \
     --images assets/images/truck.jpg \
     --points 250,175 \
     --output results/truck_points
+
+# Batch: multiple images with the same text prompt
+uv run python image_prompter.py \
+    --images img1.jpg img2.jpg img3.jpg \
+    --prompts "person" \
+    --output results/batch
+
+# Combined: text + points on a single image
+uv run python image_prompter.py \
+    --images scene.jpg \
+    --prompts "dog" \
+    --points 120,340 \
+    --point-labels 1 \
+    --alpha 0.45 --device cpu
 ```
 
-### video_prompter.py
+### video\_prompter.py
+
+Segment a video with text prompts, click points, or binary masks.  Supports
+automatic memory-aware chunking, segment processing (frame or time ranges),
+and generates per-object tracking metadata.
+
+#### Options
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--video` | `str` | *(required)* | Input video file |
+| `--prompts` | `str+` | `None` | Text prompts (e.g. `person ball`) |
+| `--points` | `str+` | `None` | Click points as `x,y` pairs |
+| `--point-labels` | `int+` | all `1` | Labels for each point (`1` = positive, `0` = negative) |
+| `--masks` | `str+` | `None` | Binary mask image(s) for initial object prompts |
+| `--output` | `str` | `results` | Output directory |
+| `--alpha` | `float` | `0.5` | Overlay alpha (`0.0`–`1.0`) |
+| `--device` | `str` | auto | Force `cpu` or `cuda` |
+| `--chunk-spread` | `str` | `default` | Chunk size strategy: `default` or `even` |
+| `--keep-temp` | flag | off | Preserve intermediate chunk files in output |
+| `--frame-range` | `int int` | `None` | Process only frames `START..END` (0-based, inclusive) |
+| `--time-range` | `str str` | `None` | Process a time segment (seconds, `MM:SS`, or `HH:MM:SS`) |
+
+At least one of `--prompts`, `--points`, or `--masks` is required.
+`--frame-range` and `--time-range` are mutually exclusive.
+
+#### Examples
 
 ```bash
-# Text prompt with auto-chunking
+# Text prompt — segment all people and tennis rackets
 uv run python video_prompter.py \
     --video assets/videos/tennis_480p.mp4 \
     --prompts "person" "tennis racket" \
     --output results/tennis_demo
 
-# Point prompt on a specific frame
+# Point prompt
 uv run python video_prompter.py \
     --video assets/videos/tennis_480p.mp4 \
     --points 320,240 \
     --output results/tennis_points
-```
 
-Both tools validate available memory before starting and display a summary
-table.  Run with `--help` for full option details.
+# Mask prompt — provide binary mask images as initial objects
+uv run python video_prompter.py \
+    --video clip.mp4 \
+    --masks player_mask.png ball_mask.png \
+    --output results/masks_demo
+
+# Frame-range — process only frames 100 to 500
+uv run python video_prompter.py \
+    --video match.mp4 \
+    --prompts "player" \
+    --frame-range 100 500
+
+# Time-range with MM:SS notation — process from 0:05 to 0:30
+uv run python video_prompter.py \
+    --video match.mp4 \
+    --prompts "player" \
+    --time-range 0:05 0:30
+
+# Time-range with seconds — process 10s to 45.5s
+uv run python video_prompter.py \
+    --video match.mp4 \
+    --prompts "player" \
+    --time-range 10.0 45.5
+
+# Time-range with HH:MM:SS — process a 5-minute segment
+uv run python video_prompter.py \
+    --video long_match.mp4 \
+    --prompts "player" \
+    --time-range 0:02:00 0:07:00
+
+# Even chunk spread + preserve temp files
+uv run python video_prompter.py \
+    --video clip.mp4 \
+    --prompts "person" \
+    --chunk-spread even --keep-temp
+
+# Force CPU processing
+uv run python video_prompter.py \
+    --video clip.mp4 \
+    --prompts "person" \
+    --device cpu
+```
 
 ---
 
@@ -231,6 +334,87 @@ results back together.
 | `min_frames` | 25 | Minimum frames per chunk |
 | `chunk_overlap` | 1 | Overlap frames between chunks |
 | `CHUNK_MASK_MATCHING_IOU_THRESHOLD` | 0.75 | IoU threshold for cross-chunk ID matching |
+
+---
+
+## Output Structure
+
+### image\_prompter.py
+
+```
+results/<image_name>/
+├── masks/
+│   ├── <prompt>/
+│   │   ├── object_0_mask.png
+│   │   ├── object_1_mask.png
+│   │   └── ...
+│   └── ...
+├── overlays/
+│   ├── overlay_<prompt>.png
+│   └── ...
+└── metadata.json
+```
+
+### video\_prompter.py
+
+```
+results/<video_name>/
+├── masks/
+│   ├── <prompt>/
+│   │   ├── object_0_mask.mp4     # binary mask video per object
+│   │   ├── object_1_mask.mp4
+│   │   └── object_tracking.json  # per-object tracking metadata
+│   └── ...
+├── overlay_<prompt>.mp4          # coloured overlay on original video
+├── metadata/
+│   ├── video_metadata.json       # fps, resolution, frame count
+│   └── memory_info.json          # RAM/VRAM budget analysis
+├── temp_files/                   # only when --keep-temp is set
+│   ├── chunk_000/
+│   │   └── masks/<prompt>/object_<id>/*.png
+│   └── ...
+└── metadata.json                 # final run metadata
+```
+
+### Object tracking metadata
+
+Each `object_tracking.json` contains a list of objects with their frame
+presence, timestamps, and timecodes mapped to the **original** video
+(accounting for any `--frame-range` / `--time-range` offset):
+
+```json
+[
+  {
+    "object_id": 0,
+    "first_frame": 12,
+    "last_frame": 487,
+    "total_frames_active": 476,
+    "total_frames": 500,
+    "first_timestamp": 0.48,
+    "last_timestamp": 19.48,
+    "duration_s": 19.0,
+    "first_timecode": "00:00:00.480",
+    "last_timecode": "00:00:19.480"
+  },
+  {
+    "object_id": 1,
+    "first_frame": 0,
+    "last_frame": 500,
+    "total_frames_active": 501,
+    "total_frames": 500,
+    "first_timestamp": 0.0,
+    "last_timestamp": 20.0,
+    "duration_s": 20.0,
+    "first_timecode": "00:00:00.000",
+    "last_timecode": "00:00:20.000"
+  }
+]
+```
+
+The top-level `metadata.json` also includes:
+
+- `segment` — the resolved frame range when `--frame-range` or `--time-range` is used (`null` for full-video)
+- `object_tracking` — the same per-object data keyed by prompt name
 
 ---
 
