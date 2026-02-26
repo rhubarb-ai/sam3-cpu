@@ -764,7 +764,7 @@ The underlying SAM 3 model weights are subject to Meta's [SAM License](https://g
 
 ---
 
-## Contact
+## Contributors
 
 **Dr Prashant Aparajeya**
 Email: p.aparajeya@gmail.com
