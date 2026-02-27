@@ -56,8 +56,12 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         self.max_point_num_in_prompt_enc = max_point_num_in_prompt_enc
         self.non_overlap_masks_for_output = non_overlap_masks_for_output
 
-        self.bf16_context = torch.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu", dtype=torch.bfloat16)
-        self.bf16_context.__enter__()  # keep using for the entire model process
+        # Only use bfloat16 autocast for actual CUDA execution;
+        # on CPU this causes dtype mismatches in conv layers.
+        # Defer autocast activation — it will be enabled lazily on the first
+        # init_state() call once we know the actual device of the parameters.
+        self.bf16_context = None
+        self._bf16_initialized = False
 
         self.iter_use_prev_mask_pred = True
         self.add_all_frames_to_correct_as_cond = True
@@ -75,6 +79,13 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         async_loading_frames=False,
     ):
         """Initialize a inference state."""
+        # Lazily activate bfloat16 autocast only when running on CUDA
+        if not self._bf16_initialized:
+            self._bf16_initialized = True
+            if self.device.type == "cuda":
+                self.bf16_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                self.bf16_context.__enter__()
+
         inference_state = {}
         # whether to offload the video frames to CPU memory
         # turning on this option saves the GPU memory with only a very small overhead
@@ -1106,7 +1117,8 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         storage_device = inference_state["storage_device"]
         maskmem_features = current_out["maskmem_features"]
         if maskmem_features is not None:
-            maskmem_features = maskmem_features.to(torch.bfloat16)
+            if maskmem_features.is_cuda:
+                maskmem_features = maskmem_features.to(torch.bfloat16)
             maskmem_features = _safe_to_device(maskmem_features, storage_device)
         pred_masks_gpu = current_out["pred_masks"]
         pred_masks = _safe_to_device(pred_masks_gpu, storage_device)
@@ -1157,7 +1169,8 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
 
         # optionally offload the output to CPU memory to save GPU space
         storage_device = inference_state["storage_device"]
-        maskmem_features = maskmem_features.to(torch.bfloat16)
+        if maskmem_features.is_cuda:
+            maskmem_features = maskmem_features.to(torch.bfloat16)
         maskmem_features = _safe_to_device(maskmem_features, storage_device)
         # "maskmem_pos_enc" is the same across frames, so we only need to store one copy of it
         maskmem_pos_enc = self._get_maskmem_pos_enc(

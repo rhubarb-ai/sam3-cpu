@@ -9,6 +9,7 @@
 ## Features
 
 - **CPU + GPU** — runs on CPU out of the box; uses CUDA when available
+- **Zero GPU footprint** — `--device cpu` hides GPUs completely (0 MiB VRAM used)
 - **Memory-aware chunking** — automatically splits long videos into chunks sized to available RAM / VRAM
 - **Cross-chunk continuity** — IoU-based mask remapping keeps object IDs consistent across chunks
 - **Text, point, box & mask prompts** — unified API for all prompt types
@@ -22,6 +23,7 @@
 
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
+- [Device Selection](#device-selection)
 - [Quick Start](#quick-start)
 - [CLI Tools](#cli-tools)
   - [image\_prompter.py](#image_prompterpy)
@@ -38,7 +40,7 @@
 - [Future Work](#future-work)
 - [Citation](#citation)
 - [License](#license)
-- [Contact](#contact)
+- [Contributors](#contributors)
 
 ---
 
@@ -69,7 +71,9 @@ chmod +x setup.sh && ./setup.sh   # or: make setup
 # Install uv if not already present
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install project
+# Create virtual environment and install
+uv venv
+source .venv/bin/activate
 uv pip install -e .
 ```
 
@@ -88,8 +92,27 @@ brew install ffmpeg
 ### Verify
 
 ```bash
-python -c "from sam3 import Sam3; print('OK')"
+uv run python -c "from sam3 import Sam3; print('OK')"
 ```
+
+---
+
+## Device Selection
+
+By default, SAM3-CPU auto-detects CUDA and uses the GPU when available.
+Pass `--device cpu` to any CLI tool to force CPU execution:
+
+```bash
+# Image — force CPU
+uv run python image_prompter.py --image img.jpg --prompts dog --device cpu
+
+# Video — force CPU
+uv run python video_prompter.py --video clip.mp4 --prompts person --device cpu
+```
+
+When `--device cpu` is specified **no GPU memory is allocated at all** — the
+CUDA runtime context is never initialised, so `nvidia-smi` will show 0 MiB
+used by the process.
 
 ---
 
@@ -100,13 +123,13 @@ python -c "from sam3 import Sam3; print('OK')"
 ```python
 from sam3 import Sam3
 
-sam3 = Sam3(verbose=True)
-result = sam3.process_image(
+sam3 = Sam3()
+result = sam3.process_image_with_prompts(
     image_path="assets/images/truck.jpg",
     prompts=["truck", "wheel"],
     output_dir="results/demo",
 )
-print(result.object_ids)
+print(result)
 ```
 
 ### Video segmentation (Python)
@@ -114,11 +137,11 @@ print(result.object_ids)
 ```python
 from sam3 import Sam3
 
-sam3 = Sam3(verbose=True)
+sam3 = Sam3()
 result = sam3.process_video_with_prompts(
     video_path="assets/videos/sample.mp4",
     prompts=["person", "tennis racket"],
-    propagation_direction="both",
+    output_dir="results/demo",
 )
 ```
 
@@ -309,39 +332,33 @@ uv run python video_prompter.py \
 
 ## Python API
 
-The high-level entry point is `Sam3`:
+The high-level entry point is `Sam3` (alias for `Sam3API`):
 
 ```python
 from sam3 import Sam3
-sam3 = Sam3(verbose=True)
+sam3 = Sam3()
 ```
 
 ### Image scenarios
 
 | Method | Description |
 |---|---|
-| `process_image(image_path, prompts, ...)` | Segment by text prompts |
-| `process_image_with_bounding_box(image_path, bbox, ...)` | Segment inside a bounding box |
-| `process_image_with_click_points(image_path, click_points, labels, ...)` | Segment at clicked points |
+| `process_image_with_prompts(image_path, prompts, ...)` | Segment by text prompts |
+| `process_image_with_boxes(image_path, boxes, ...)` | Segment inside bounding boxes |
 
 ### Video scenarios
 
 | Method | Description |
 |---|---|
 | `process_video_with_prompts(video_path, prompts, ...)` | Segment & track by text prompts |
-| `process_video_with_click_points(video_path, click_points, ...)` | Segment & track from point clicks |
-| `process_video_with_masks(video_path, masks, ...)` | Segment & track from initial masks |
 
-All video methods support:
+Video processing supports:
 
 - `propagation_direction` — `"forward"`, `"backward"`, or `"both"` (default)
-- `frame_range` / `time_range` / `timestamp_range` — process a sub-section of the video
 - Automatic chunking when memory is limited (see below)
 
 Lower-level access is available through `ImageProcessor`, `VideoProcessor`,
 `ChunkProcessor`, and the driver classes in `sam3/drivers.py`.
-See [docs/local/README_FULL.md](docs/local/README_FULL.md) for the complete API
-reference.
 
 ---
 
@@ -354,7 +371,7 @@ results back together.
 **How it works:**
 
 1. `MemoryManager` computes how many frames fit in available RAM (CPU) or VRAM (GPU).
-2. The video is split into chunks with configurable overlap (default 1 frame).
+2. The video is split into chunks with configurable overlap (default 5 frames).
 3. Each chunk is segmented and tracked independently.
 4. At chunk boundaries, masks from the overlap region are matched using IoU and
    object IDs are remapped so they stay consistent across the full video.
@@ -363,9 +380,9 @@ results back together.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `ram_usage_percent` | 0.45 | Fraction of free RAM budget for frames |
+| `ram_usage_percent` | 0.45 | Fraction of free RAM budget for frames (override in `__globals.py`) |
 | `min_frames` | 25 | Minimum frames per chunk |
-| `chunk_overlap` | 1 | Overlap frames between chunks |
+| `chunk_overlap` | 5 | Overlap frames between chunks (`DEFAULT_MIN_CHUNK_OVERLAP` in `__globals.py`) |
 | `CHUNK_MASK_MATCHING_IOU_THRESHOLD` | 0.75 | IoU threshold for cross-chunk ID matching |
 
 ---
@@ -548,14 +565,15 @@ uv run python examples/profiler_example.py --profile
 
 ## Configuration
 
-Runtime defaults live in `config.json` (loaded at startup) and compile-time
-constants in `sam3/__globals.py`.  Key settings:
+Runtime defaults live in `config.json` (loaded by the wrapper class) and
+compile-time constants in `sam3/__globals.py`.  Key settings:
 
 ```jsonc
 {
   "ram_usage_percent": 0.45,
   "min_frames": 25,
   "chunk_overlap": 1,
+  "prefetch_threshold": 0.90,
   "tmp_base": "/tmp/sam3-cpu",
   "verbose": true,
   "image_inference_MB": 6755,
@@ -593,15 +611,14 @@ sam3-cpu/
 │   │   ├── ffmpeglib.py
 │   │   └── visualization.py
 │   ├── model/                 # SAM 3 model definitions
-│   ├── sam/                   # SAM core modules
-│   └── archive/               # Deprecated & rough scripts
+│   └── sam/                   # SAM core modules
 │
 ├── examples/                  # Runnable example scripts
 ├── notebook/                  # Jupyter notebooks
 ├── tests/                     # Pytest test suite
 ├── scripts/                   # Utility scripts
 ├── assets/                    # Sample images & videos
-└── docs/                      # Extended documentation
+└── README.md
 ```
 
 ---

@@ -36,9 +36,13 @@ class Sam3VideoPredictor:
         video_loader_type="cv2",
         apply_temporal_disambiguation: bool = True,
         compile: bool = False,
+        device=None,
     ):
         self.async_loading_frames = async_loading_frames
         self.video_loader_type = video_loader_type
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
         from sam3.model_builder import build_sam3_video_model
 
         self.model = (
@@ -50,10 +54,13 @@ class Sam3VideoPredictor:
                 strict_state_dict_loading=strict_state_dict_loading,
                 apply_temporal_disambiguation=apply_temporal_disambiguation,
                 compile=compile,
+                device=device,
             )
-            .cuda()
             .eval()
         )
+        # Ensure float32 on CPU — checkpoints may store bfloat16 weights
+        if device == "cpu":
+            self.model = self.model.float()
 
     @torch.inference_mode()
     def handle_request(self, request):

@@ -1,6 +1,7 @@
-import torch
 import os
 import sys
+
+import torch
 import sam3
 from sam3.utils.logger import get_logger, LOG_LEVELS
 

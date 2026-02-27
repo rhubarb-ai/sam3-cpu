@@ -28,10 +28,11 @@ def main():
     
     # Initialize wrapper with custom settings
     wrapper = Sam3Wrapper(
-        ram_usage_percent=0.25,    # Use 25% of available RAM
+        ram_usage_percent=0.45,     # Use 45% of available RAM
         min_frames=25,              # Minimum frames required
         chunk_overlap=1,            # 1 frame overlap between chunks
-        tmp_base="/tmp/sam3-cpu",  # Temporary workspace
+        prefetch_threshold=0.90,    # Start loading next chunk at 90% completion
+        tmp_base="/tmp/sam3-cpu",   # Temporary workspace
         verbose=True                # Print detailed logs
     )
     

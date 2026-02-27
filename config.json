@@ -1,5 +1,5 @@
 {
-  "ram_usage_percent": 0.25,
+  "ram_usage_percent": 0.45,
   "min_frames": 25,
   "chunk_overlap": 1,
   "prefetch_threshold": 0.90,
