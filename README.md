@@ -116,7 +116,7 @@ from sam3 import Sam3
 
 sam3 = Sam3(verbose=True)
 result = sam3.process_video_with_prompts(
-    video_path="assets/videos/tennis_480p.mp4",
+    video_path="assets/videos/sample.mp4",
     prompts=["person", "tennis racket"],
     propagation_direction="both",
 )
@@ -133,7 +133,7 @@ make run-example EXAMPLE=a
 
 # CLI tools via make
 make image-prompter IMAGES='assets/images/truck.jpg' PROMPTS='truck wheel'
-make video-prompter VIDEO='assets/videos/tennis_480p.mp4' PROMPTS='person'
+make video-prompter VIDEO='assets/videos/sample.mp4' PROMPTS='person'
 make video-prompter VIDEO='clip.mp4' PROMPTS='player' FRAME_RANGE='100 500'
 make video-prompter VIDEO='clip.mp4' PROMPTS='player' TIME_RANGE='0:05 0:30'
 ```
@@ -252,13 +252,13 @@ At least one of `--prompts`, `--points`, or `--masks` is required.
 ```bash
 # Text prompt — segment all people and tennis rackets
 uv run python video_prompter.py \
-    --video assets/videos/tennis_480p.mp4 \
+    --video assets/videos/sample.mp4 \
     --prompts "person" "tennis racket" \
     --output results/tennis_demo
 
 # Point prompt
 uv run python video_prompter.py \
-    --video assets/videos/tennis_480p.mp4 \
+    --video assets/videos/sample.mp4 \
     --points 320,240 \
     --output results/tennis_points
 
