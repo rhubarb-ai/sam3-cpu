@@ -157,9 +157,11 @@ def _validate_video_memory(video_path: Path, device: str) -> Dict[str, Any]:
     if device == "cuda":
         mem = vram_stat()
         pct = VRAM_USAGE_PERCENT
+        available = mem["free"]
     else:
         mem = ram_stat()
         pct = RAM_USAGE_PERCENT
+        available = mem["available"]
 
     info: Dict[str, Any] = {
         "video": str(video_path),
@@ -169,7 +171,7 @@ def _validate_video_memory(video_path: Path, device: str) -> Dict[str, Any]:
         "duration_s": round(video_info.get("duration", 0), 2),
         "device": device,
         "total_memory": mem["total"],
-        "available_memory": mem["available"],
+        "available_memory": available,
         "inference_overhead_mb": VIDEO_INFERENCE_MB,
         "max_frames_per_chunk": max_frames,
         "can_process": max_frames >= DEFAULT_MIN_VIDEO_FRAMES,
@@ -181,7 +183,7 @@ def _validate_video_memory(video_path: Path, device: str) -> Dict[str, Any]:
             VIDEO_INFERENCE_MB * 1024**2
             + DEFAULT_MIN_VIDEO_FRAMES * frame_bytes
         )
-        info["deficit_bytes"] = max(needed - mem["available"], 0)
+        info["deficit_bytes"] = max(needed - available, 0)
     else:
         info["deficit_bytes"] = 0
 

@@ -83,16 +83,18 @@ def _validate_memory(image_path: Path, device: str) -> Dict[str, Any]:
     if device == "cuda":
         mem = vram_stat()
         pct = VRAM_USAGE_PERCENT
+        available = mem["free"]
     else:
         mem = ram_stat()
         pct = RAM_USAGE_PERCENT
+        available = mem["available"]
 
     info = {
         "image": str(image_path),
         "resolution": f"{width}x{height}",
         "device": device,
         "total_memory": mem["total"],
-        "available_memory": mem["available"],
+        "available_memory": available,
         "inference_overhead_mb": IMAGE_INFERENCE_MB,
         "usage_percent": pct,
         "can_process": max_frames > 0,
@@ -100,7 +102,7 @@ def _validate_memory(image_path: Path, device: str) -> Dict[str, Any]:
 
     if not info["can_process"]:
         needed = IMAGE_INFERENCE_MB * 1024**2 + width * height * 3
-        deficit = needed - mem["available"]
+        deficit = needed - available
         info["deficit_bytes"] = max(deficit, 0)
 
     return info

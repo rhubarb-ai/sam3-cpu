@@ -24,19 +24,11 @@ NO_OBJ_SCORE = -1024.0
 
 
 def _safe_to_device(tensor, device):
-    """Safely move tensor to device without triggering CUDA initialization."""
-    # If tensor is already on CUDA, safe to use non_blocking
-    if tensor.is_cuda:
+    """Move tensor to *device*, using non_blocking when possible."""
+    if tensor.device == torch.device(device):
+        return tensor
+    if tensor.is_cuda or str(device).startswith("cuda"):
         return tensor.to(device, non_blocking=True)
-    
-    # Convert device to string for comparison
-    device_str = str(device) if not isinstance(device, str) else device
-    
-    # If trying to move CPU tensor to CUDA, keep on CPU (avoids CUDA init)
-    if 'cuda' in device_str.lower():
-        return tensor  # Keep on current device (CPU)
-    
-    # CPU to CPU transfer
     return tensor.to(device)
 
 
