@@ -10,9 +10,8 @@ from typing import Dict, List, Optional
 import numpy as np
 from typing_extensions import Literal
 import torch
-from sam3.model.box_ops import box_xywh_to_cxcywh
 from sam3.utils.profiler import profile
-from sam3.__globals import DEVICE, BPE_PATH
+from sam3.__globals import DEVICE, BPE_PATH, CPU_CORES_PERCENT
 from sam3.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -96,6 +95,18 @@ class Sam3ImageDriver:
             logger.warning("Running on CPU. For better performance, please run on a GPU.")
             # Query CPU capabilities to enable optimal SIMD instructions
             torch.backends.cpu.get_cpu_capability()
+            # Tune threading to avoid over-subscription:
+            #  - intra-op: physical cores (parallelism within a single matmul/conv)
+            #  - inter-op: 1 (run ops sequentially — avoids lock contention)
+            import psutil
+            phys = psutil.cpu_count(logical=False)*CPU_CORES_PERCENT or 1
+            phys = max(1, int(phys))  # Ensure at least 1 thread is used
+            torch.set_num_threads(phys)
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                pass  # can only be set once per process
+            logger.info(f"CPU threads: intra-op={torch.get_num_threads()}, inter-op={torch.get_num_interop_threads()}")
         else:
             logger.info("Running on GPU. Enabling TF32 and bfloat16 for better performance.")
             # Enable TensorFloat-32 for Ampere GPUs (RTX 30xx, A100, etc.)
@@ -482,6 +493,18 @@ class Sam3VideoDriver():
             logger.warning("Running on CPU. For better performance, please run on a GPU.")
             # Query CPU capabilities to optimize for available instruction sets (AVX2, AVX512, etc.)
             torch.backends.cpu.get_cpu_capability()
+            # Tune threading to avoid over-subscription:
+            #  - intra-op: physical cores (parallelism within a single matmul/conv)
+            #  - inter-op: 1 (run ops sequentially — avoids lock contention)
+            import psutil
+            phys = psutil.cpu_count(logical=False)*CPU_CORES_PERCENT or 1
+            phys = max(1, int(phys))  # Ensure at least 1 thread is used
+            torch.set_num_threads(phys)
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                pass  # can only be set once per process
+            logger.info(f"CPU threads: intra-op={torch.get_num_threads()}, inter-op={torch.get_num_interop_threads()}")
             self.predictor = build_sam3_video_predictor_cpu(bpe_path=bpe_path, num_workers=num_workers)
         else:
             from sam3.model_builder import build_sam3_video_predictor

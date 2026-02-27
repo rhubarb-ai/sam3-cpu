@@ -276,7 +276,7 @@ At least one of `--prompts`, `--points`, or `--masks` is required.
 # Text prompt — segment all people and tennis rackets
 uv run python video_prompter.py \
     --video assets/videos/sample.mp4 \
-    --prompts "person" "tennis racket" \
+    --prompts "player" "tennis racket" \
     --output results/tennis_demo
 
 # Point prompt

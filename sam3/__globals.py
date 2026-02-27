@@ -43,6 +43,7 @@ TENSOR_SIZE_BYTES = 1008*1008*3*4 # Approximate size of a 1008x1008 RGB tensor i
 RAM_USAGE_PERCENT = 0.45   # Use 45% of available RAM for CPU video chunking (conservative)
 # RAM_USAGE_PERCENT = 0.65   # Use 65% of available RAM for CPU video chunking (conservative)
 VRAM_USAGE_PERCENT = 0.65  # Use 65% of available VRAM for GPU video chunking (aggressive, GPU memory is dedicated)
+CPU_CORES_PERCENT = 0.90   # Use 90% of CPU cores for parallel processing (leave some for OS and other tasks)
 
 MEMORY_SAFETY_MULTIPLIER = 1.5  # Require 1.5x estimated memory for safety (reduced from 3x)
 CPU_MEMORY_RESERVE_PERCENT = 0.3  # Reserve 30% for OS
