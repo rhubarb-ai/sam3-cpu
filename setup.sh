@@ -171,17 +171,95 @@ install_uv() {
     fi
 }
 
+# Create or reuse virtual environment
+setup_venv() {
+    log_info "Setting up Python virtual environment..."
+
+    VENV_DIR=".venv"
+
+    if [ -d "$VENV_DIR" ] && [ -f "$VENV_DIR/bin/activate" ]; then
+        log_success "Existing virtual environment found at $VENV_DIR"
+    else
+        log_info "Creating virtual environment with uv..."
+        if uv venv "$VENV_DIR"; then
+            log_success "Virtual environment created at $VENV_DIR"
+        else
+            log_error "Failed to create virtual environment"
+            exit 1
+        fi
+    fi
+
+    # Activate the virtual environment for the remainder of this script
+    # shellcheck disable=SC1091
+    source "$VENV_DIR/bin/activate"
+    log_success "Virtual environment activated"
+}
+
+# Detect GPU availability and pick the right PyTorch index
+detect_compute() {
+    log_info "Detecting compute platform (CPU vs GPU)..."
+
+    TORCH_INDEX=""
+
+    if command -v nvidia-smi &> /dev/null; then
+        # nvidia-smi exists – try to read driver/CUDA version
+        CUDA_VERSION=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' || true)
+        if [ -n "$CUDA_VERSION" ]; then
+            CUDA_MAJOR=$(echo "$CUDA_VERSION" | cut -d'.' -f1)
+            CUDA_MINOR=$(echo "$CUDA_VERSION" | cut -d'.' -f2)
+            log_success "NVIDIA GPU detected – CUDA $CUDA_VERSION"
+
+            # Map driver-reported CUDA to the closest PyTorch wheel index
+            if [ "$CUDA_MAJOR" -ge 13 ]; then
+                TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+            elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 8 ]; then
+                TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+            elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 6 ]; then
+                TORCH_INDEX="https://download.pytorch.org/whl/cu126"
+            elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 4 ]; then
+                TORCH_INDEX="https://download.pytorch.org/whl/cu124"
+            elif [ "$CUDA_MAJOR" -eq 12 ]; then
+                TORCH_INDEX="https://download.pytorch.org/whl/cu121"
+            elif [ "$CUDA_MAJOR" -eq 11 ]; then
+                TORCH_INDEX="https://download.pytorch.org/whl/cu118"
+            else
+                log_warning "Unrecognised CUDA version $CUDA_VERSION – falling back to CPU wheels"
+            fi
+        fi
+    fi
+
+    if [ -z "$TORCH_INDEX" ]; then
+        TORCH_INDEX="https://download.pytorch.org/whl/cpu"
+        log_info "No NVIDIA GPU detected – will install CPU-only PyTorch"
+    fi
+}
+
 # Install Python dependencies
 install_python_deps() {
     log_info "Installing Python dependencies..."
-    
+
     if ! command -v uv &> /dev/null; then
         log_error "uv not found in PATH"
         log_error "Please ensure uv is installed and in your PATH"
         exit 1
     fi
-    
-    # Install project in development mode
+
+    # 1. Ensure a virtual environment exists and is active
+    setup_venv
+
+    # 2. Detect CPU vs GPU
+    detect_compute
+
+    # 3. Install PyTorch (+ torchvision) from the correct index first
+    log_info "Installing PyTorch from: $TORCH_INDEX"
+    if uv pip install torch torchvision --index-url "$TORCH_INDEX"; then
+        log_success "PyTorch installed"
+    else
+        log_error "Failed to install PyTorch"
+        exit 1
+    fi
+
+    # 4. Install project in development mode (remaining deps come from pyproject.toml)
     log_info "Installing SAM3 CPU in development mode..."
     if uv pip install -e .; then
         log_success "Python dependencies installed"
@@ -195,8 +273,14 @@ install_python_deps() {
 verify_installation() {
     log_info "Verifying installation..."
     
+    # Use the venv python explicitly
+    PYTHON_BIN="${VIRTUAL_ENV:-$(pwd)/.venv}/bin/python3"
+    if [ ! -x "$PYTHON_BIN" ]; then
+        PYTHON_BIN="python3"
+    fi
+
     # Check if sam3 can be imported
-    if python3 -c "from sam3 import Sam3; print('✓ Sam3 import successful')" 2>/dev/null; then
+    if "$PYTHON_BIN" -c "from sam3 import Sam3; print('✓ Sam3 import successful')" 2>/dev/null; then
         log_success "SAM3 import verification passed"
     else
         log_error "Failed to import sam3 module"
@@ -205,11 +289,11 @@ verify_installation() {
     fi
     
     # Check PyTorch
-    if python3 -c "import torch; print(f'✓ PyTorch {torch.__version__}')" 2>/dev/null; then
+    if "$PYTHON_BIN" -c "import torch; print(f'✓ PyTorch {torch.__version__}')" 2>/dev/null; then
         log_success "PyTorch verification passed"
         
         # Check CUDA availability
-        CUDA_AVAILABLE=$(python3 -c "import torch; print(torch.cuda.is_available())" 2>/dev/null)
+        CUDA_AVAILABLE=$("$PYTHON_BIN" -c "import torch; print(torch.cuda.is_available())" 2>/dev/null)
         if [ "$CUDA_AVAILABLE" == "True" ]; then
             log_success "CUDA is available for GPU acceleration"
         else
@@ -238,6 +322,10 @@ print_next_steps() {
     echo -e "${GREEN}║              Setup completed successfully! 🎉             ║${NC}"
     echo -e "${GREEN}║                                                           ║${NC}"
     echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${BLUE}Before you begin, activate the virtual environment:${NC}"
+    echo ""
+    echo -e "     source .venv/bin/activate"
     echo ""
     echo -e "${BLUE}Next steps:${NC}"
     echo ""
