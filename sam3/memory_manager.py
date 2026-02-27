@@ -56,22 +56,24 @@ class MemoryManager:
         if device == 'cpu':
             memory_info = ram_stat()
             percent  = RAM_USAGE_PERCENT
+            available_key = 'available'
             vid_memory_max_usage = RAM_USAGE_PERCENT * memory_info['total'] * (1 - CPU_MEMORY_RESERVE_PERCENT)
         elif device == 'cuda':
             memory_info = vram_stat()
             percent  = VRAM_USAGE_PERCENT
+            available_key = 'free'
             vid_memory_max_usage = VRAM_USAGE_PERCENT * memory_info['total'] * (1 - GPU_MEMORY_RESERVE_PERCENT)
         else:
             raise ValueError(f"Unsupported device type: {device}")
 
         if type == 'video':
-            available_bytes = memory_info['available'] - VIDEO_INFERENCE_MB * 1024 ** 2
+            available_bytes = memory_info[available_key] - VIDEO_INFERENCE_MB * 1024 ** 2
         else:
-            available_bytes = memory_info['available'] - IMAGE_INFERENCE_MB * 1024 ** 2
+            available_bytes = memory_info[available_key] - IMAGE_INFERENCE_MB * 1024 ** 2
         
         if available_bytes <= 0:
             least_extra_mb = DEFAULT_MIN_VIDEO_FRAMES * (VIDEO_INFERENCE_MB if type == 'video' else IMAGE_INFERENCE_MB) + bytes_per_frame // (1024 ** 2)
-            logger.warning(f"Not enough available RAM for inference. Available: {memory_info['available']} bytes, Required: {least_extra_mb} MB. Consider freeing up memory or reducing video resolution.")
+            logger.warning(f"Not enough available memory for inference. Available: {memory_info[available_key]} bytes, Required: {least_extra_mb} MB. Consider freeing up memory or reducing video resolution.")
             return 0
         
         usable_bytes = int(available_bytes * percent)
