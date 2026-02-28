@@ -565,7 +565,7 @@ def _setup_device_and_mode(model, device, eval_mode):
     if device == "cuda":
         model = model.cuda()
     elif device == "cpu":
-        model = model.cpu()
+        model = model.cpu().float()  # ensure float32 — checkpoints may be bfloat16
     else:
         raise ValueError(f"Unsupported device: {device}")
     if eval_mode:
@@ -810,6 +810,9 @@ def build_sam3_video_model(
             print(f"Unexpected keys: {unexpected_keys}")
 
     model.to(device=device)
+    # Ensure float32 on CPU — checkpoints may store bfloat16 weights
+    if str(device) == "cpu":
+        model = model.float()
     return model
 
 

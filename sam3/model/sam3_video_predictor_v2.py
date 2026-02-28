@@ -53,6 +53,10 @@ class Sam3VideoPredictor:
             apply_temporal_disambiguation=apply_temporal_disambiguation,
             device=device,
         ).eval()
+        # Ensure float32 on CPU — checkpoints may store bfloat16 weights which
+        # cause dtype mismatches in conv layers on CPU.
+        if device == "cpu":
+            self.model = self.model.float()
 
     @torch.inference_mode()
     def handle_request(self, request):

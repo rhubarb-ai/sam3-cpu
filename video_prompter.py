@@ -27,6 +27,14 @@ Usage:
         --output results/match --alpha 0.4 --device cpu --keep-temp
 """
 
+# ---- Force-CPU guard (must run before ANY torch/sam3 import) ----
+import os as _os, sys as _sys
+if '--device' in _sys.argv:
+    _i = _sys.argv.index('--device')
+    if _i + 1 < len(_sys.argv) and _sys.argv[_i + 1].lower() == 'cpu':
+        _os.environ['CUDA_VISIBLE_DEVICES'] = ''
+# -----------------------------------------------------------------
+
 import argparse
 import json
 import re
@@ -648,7 +656,7 @@ def _process_video(
     # ----- Load model once -----
     print("Loading SAM3 video model...")
     from sam3.drivers import Sam3VideoDriver
-    driver = Sam3VideoDriver()
+    driver = Sam3VideoDriver(device=device)
     print("Model loaded.\n")
 
     # ----- Validate mask dimensions (if masks provided) -----

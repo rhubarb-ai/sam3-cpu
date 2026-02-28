@@ -10,9 +10,8 @@ from typing import Dict, List, Optional
 import numpy as np
 from typing_extensions import Literal
 import torch
-from sam3.model.box_ops import box_xywh_to_cxcywh
 from sam3.utils.profiler import profile
-from sam3.__globals import DEVICE, BPE_PATH
+from sam3.__globals import DEVICE, BPE_PATH, CPU_CORES_PERCENT
 from sam3.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -40,18 +39,20 @@ class Sam3ImageDriver:
         predictor: The underlying SAM3 model predictor instance.
     """
     
-    def __init__(self, bpe_path: str = BPE_PATH, num_workers: Optional[int] = 1):
+    def __init__(self, bpe_path: str = BPE_PATH, num_workers: Optional[int] = 1, device: Optional[str] = None):
         """Initialize the SAM3 image driver.
         
         Args:
             bpe_path: Path to the BPE tokenizer model file. Defaults to global BPE_PATH.
             num_workers: Number of worker threads for CPU processing. Only used on CPU.
                         Defaults to 1. Higher values may improve throughput but increase memory.
+            device: Force device ('cpu' or 'cuda'). Auto-detected if None.
         
         Raises:
             FileNotFoundError: If bpe_path does not exist.
             RuntimeError: If model loading fails.
         """
+        self._device = device or DEVICE.type
         self.predictor = self._get_predictor(bpe_path=bpe_path, num_workers=num_workers)
 
     @profile()
@@ -89,10 +90,23 @@ class Sam3ImageDriver:
             - GPU (Ampere): Enables TF32 for faster matrix operations (~3x speedup)
             - GPU: Uses bfloat16 precision for reduced memory and faster compute
         """
-        if DEVICE.type == "cpu":
+        device = self._device
+        if device == "cpu":
             logger.warning("Running on CPU. For better performance, please run on a GPU.")
             # Query CPU capabilities to enable optimal SIMD instructions
             torch.backends.cpu.get_cpu_capability()
+            # Tune threading to avoid over-subscription:
+            #  - intra-op: physical cores (parallelism within a single matmul/conv)
+            #  - inter-op: 1 (run ops sequentially — avoids lock contention)
+            import psutil
+            phys = psutil.cpu_count(logical=False)*CPU_CORES_PERCENT or 1
+            phys = max(1, int(phys))  # Ensure at least 1 thread is used
+            torch.set_num_threads(phys)
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                pass  # can only be set once per process
+            logger.info(f"CPU threads: intra-op={torch.get_num_threads()}, inter-op={torch.get_num_interop_threads()}")
         else:
             logger.info("Running on GPU. Enabling TF32 and bfloat16 for better performance.")
             # Enable TensorFloat-32 for Ampere GPUs (RTX 30xx, A100, etc.)
@@ -105,7 +119,7 @@ class Sam3ImageDriver:
             # bfloat16 has same exponent range as FP32 but reduced precision (good for ML)
             torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
 
-        return self._build_model(bpe_path=bpe_path, device=DEVICE.type)
+        return self._build_model(bpe_path=bpe_path, device=device)
         
     @profile()
     def inference(self, image):
@@ -134,7 +148,7 @@ class Sam3ImageDriver:
         if self.predictor is None:
             raise ValueError("Model is not loaded.")
         # confidence_threshold=0.5 filters out low-confidence detections
-        processor = Sam3Processor(self.predictor, confidence_threshold=0.5)
+        processor = Sam3Processor(self.predictor, confidence_threshold=0.5, device=self._device)
         inference_state = processor.set_image(image)
         return processor, inference_state
     
@@ -369,10 +383,11 @@ class Sam3ImageDriver:
             ...     driver.cleanup()  # Free memory before next image
         """
         # Device-specific memory cleanup
-        if DEVICE.type == "cuda":
+        device = getattr(self, '_device', DEVICE.type)
+        if device == "cuda":
             # Clear PyTorch's GPU memory cache
             torch.cuda.empty_cache()
-        elif DEVICE.type == "cpu":
+        elif device == "cpu":
             # Linux-specific: Return freed memory to OS via glibc malloc_trim
             # This is more aggressive than standard Python GC
             import ctypes
@@ -439,7 +454,7 @@ class Sam3VideoDriver():
         predictor: The underlying SAM3 video predictor instance (CPU or GPU variant).
     """
     
-    def __init__(self, bpe_path: Optional[str] = BPE_PATH, num_workers: Optional[int] = 1):
+    def __init__(self, bpe_path: Optional[str] = BPE_PATH, num_workers: Optional[int] = 1, device: Optional[str] = None):
         """Initialize the SAM3 video driver.
         
         Args:
@@ -447,12 +462,14 @@ class Sam3VideoDriver():
             num_workers: Number of worker threads for CPU processing, or number of GPUs to use.
                         - CPU: Controls parallel frame processing (recommend: CPU cores / 2)
                         - GPU: Number of GPUs to use (default: all available)
+            device: Force device ('cpu' or 'cuda'). Auto-detected if None.
         
         Raises:
             FileNotFoundError: If bpe_path does not exist.
             RuntimeError: If model loading fails or no compatible device found.
         """
-        self._get_predictor(bpe_path=bpe_path, num_workers=num_workers)
+        self._device = device or DEVICE.type
+        self._get_predictor(bpe_path=bpe_path, num_workers=num_workers, device=self._device)
 
     @profile()
     def _get_predictor(self, bpe_path: Optional[str], num_workers: Optional[int] = None, device: str = DEVICE.type):
@@ -476,6 +493,18 @@ class Sam3VideoDriver():
             logger.warning("Running on CPU. For better performance, please run on a GPU.")
             # Query CPU capabilities to optimize for available instruction sets (AVX2, AVX512, etc.)
             torch.backends.cpu.get_cpu_capability()
+            # Tune threading to avoid over-subscription:
+            #  - intra-op: physical cores (parallelism within a single matmul/conv)
+            #  - inter-op: 1 (run ops sequentially — avoids lock contention)
+            import psutil
+            phys = psutil.cpu_count(logical=False)*CPU_CORES_PERCENT or 1
+            phys = max(1, int(phys))  # Ensure at least 1 thread is used
+            torch.set_num_threads(phys)
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                pass  # can only be set once per process
+            logger.info(f"CPU threads: intra-op={torch.get_num_threads()}, inter-op={torch.get_num_interop_threads()}")
             self.predictor = build_sam3_video_predictor_cpu(bpe_path=bpe_path, num_workers=num_workers)
         else:
             from sam3.model_builder import build_sam3_video_predictor
@@ -954,10 +983,11 @@ class Sam3VideoDriver():
         self.shutdown()
 
         # Device-specific aggressive memory recovery
-        if DEVICE.type == "cuda":
+        device = getattr(self, '_device', DEVICE.type)
+        if device == "cuda":
             # Clear PyTorch's CUDA memory cache
             torch.cuda.empty_cache()
-        elif DEVICE.type == "cpu":
+        elif device == "cpu":
             # Linux-specific: Return freed memory to OS via glibc malloc_trim
             import ctypes
             import gc

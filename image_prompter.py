@@ -24,6 +24,14 @@ Usage:
     python image_prompter.py --images img.jpg --prompts cat --device cpu
 """
 
+# ---- Force-CPU guard (must run before ANY torch/sam3 import) ----
+import os as _os, sys as _sys
+if '--device' in _sys.argv:
+    _i = _sys.argv.index('--device')
+    if _i + 1 < len(_sys.argv) and _sys.argv[_i + 1].lower() == 'cpu':
+        _os.environ['CUDA_VISIBLE_DEVICES'] = ''
+# -----------------------------------------------------------------
+
 import argparse
 import json
 import sys
@@ -493,7 +501,7 @@ Examples:
         if driver is None:
             print("  Loading model...")
             from sam3.drivers import Sam3ImageDriver
-            driver = Sam3ImageDriver()
+            driver = Sam3ImageDriver(device=device)
             print("  Model loaded.\n")
 
         image = Image.open(img_path)
