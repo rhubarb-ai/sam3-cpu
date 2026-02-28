@@ -165,13 +165,19 @@ def _process_image_with_text_prompts(
     image_name: str,
     output_dir: Path,
     alpha: float,
-):
-    """Process an image with one or more text prompts."""
+) -> List[Dict[str, Any]]:
+    """Process an image with one or more text prompts.
+
+    Returns a list of per-prompt metadata dicts for aggregation.
+    """
     from sam3.utils.helpers import sanitize_filename
 
+    total_pixels = image.width * image.height
     processor, inference_state = driver.inference(image)
+    prompt_results: List[Dict[str, Any]] = []
 
     for prompt in prompts:
+        t_prompt_start = time.time()
         safe = sanitize_filename(prompt)
         prompt_dir = output_dir / safe
         prompt_dir.mkdir(parents=True, exist_ok=True)
@@ -193,6 +199,10 @@ def _process_image_with_text_prompts(
                 m_np = m_np[0]
             m_u8 = (m_np.astype(np.uint8) * 255)
 
+            # Mask area
+            mask_area_px = int(np.count_nonzero(m_np))
+            mask_area_pct = round(mask_area_px / total_pixels * 100, 2) if total_pixels else 0.0
+
             # Save mask PNG
             mask_path = prompt_dir / f"object_{i}_mask.png"
             Image.fromarray(m_u8, mode="L").save(mask_path)
@@ -207,19 +217,27 @@ def _process_image_with_text_prompts(
                 "object_id": i,
                 "score": score_val,
                 "box": box_val,
+                "mask_area_pixels": mask_area_px,
+                "mask_area_pct": mask_area_pct,
                 "mask_file": f"object_{i}_mask.png",
                 "overlay_file": f"object_{i}_overlay.png",
             })
+
+        prompt_time = round(time.time() - t_prompt_start, 3)
 
         # Save prompt metadata
         meta = {
             "image": image_name,
             "prompt": prompt,
             "num_objects": num,
+            "inference_time_s": prompt_time,
             "objects": meta_objects,
         }
         with open(prompt_dir / "metadata.json", "w") as f:
             json.dump(meta, f, indent=2)
+        prompt_results.append(meta)
+
+    return prompt_results
 
 
 def _process_image_with_bbox(
@@ -230,8 +248,13 @@ def _process_image_with_bbox(
     image_name: str,
     output_dir: Path,
     alpha: float,
-):
-    """Process an image with bounding box prompts."""
+) -> Dict[str, Any]:
+    """Process an image with bounding box prompts.
+
+    Returns metadata dict for aggregation.
+    """
+    t_start = time.time()
+    total_pixels = image.width * image.height
     bbox_dir = output_dir / "bbox"
     bbox_dir.mkdir(parents=True, exist_ok=True)
 
@@ -259,6 +282,9 @@ def _process_image_with_bbox(
             m_np = m_np[0]
         m_u8 = (m_np.astype(np.uint8) * 255)
 
+        mask_area_px = int(np.count_nonzero(m_np))
+        mask_area_pct = round(mask_area_px / total_pixels * 100, 2) if total_pixels else 0.0
+
         mask_path = bbox_dir / f"object_{i}_mask.png"
         Image.fromarray(m_u8, mode="L").save(mask_path)
 
@@ -268,19 +294,24 @@ def _process_image_with_bbox(
         meta_objects.append({
             "object_id": i,
             "score": float(scores[i]) if scores is not None else None,
+            "mask_area_pixels": mask_area_px,
+            "mask_area_pct": mask_area_pct,
             "mask_file": f"object_{i}_mask.png",
             "overlay_file": f"object_{i}_overlay.png",
         })
 
+    inference_time = round(time.time() - t_start, 3)
     meta = {
         "image": image_name,
         "boxes": boxes,
         "box_labels": box_labels,
         "num_objects": num,
+        "inference_time_s": inference_time,
         "objects": meta_objects,
     }
     with open(bbox_dir / "metadata.json", "w") as f:
         json.dump(meta, f, indent=2)
+    return meta
 
 
 def _process_image_with_points(
@@ -291,11 +322,16 @@ def _process_image_with_points(
     image_name: str,
     output_dir: Path,
     alpha: float,
-):
-    """Process an image with click-point prompts via geometric prompt."""
+) -> Dict[str, Any]:
+    """Process an image with click-point prompts via geometric prompt.
+
+    Returns metadata dict for aggregation.
+    """
     import torch
     from sam3.model.box_ops import box_xywh_to_cxcywh
 
+    t_start = time.time()
+    total_pixels = image.width * image.height
     pts_dir = output_dir / "points"
     pts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -326,6 +362,9 @@ def _process_image_with_points(
             m_np = m_np[0]
         m_u8 = (m_np.astype(np.uint8) * 255)
 
+        mask_area_px = int(np.count_nonzero(m_np))
+        mask_area_pct = round(mask_area_px / total_pixels * 100, 2) if total_pixels else 0.0
+
         mask_path = pts_dir / f"object_{i}_mask.png"
         Image.fromarray(m_u8, mode="L").save(mask_path)
 
@@ -335,19 +374,24 @@ def _process_image_with_points(
         meta_objects.append({
             "object_id": i,
             "score": float(scores[i]) if scores is not None else None,
+            "mask_area_pixels": mask_area_px,
+            "mask_area_pct": mask_area_pct,
             "mask_file": f"object_{i}_mask.png",
             "overlay_file": f"object_{i}_overlay.png",
         })
 
+    inference_time = round(time.time() - t_start, 3)
     meta = {
         "image": image_name,
         "points": points,
         "point_labels": point_labels,
         "num_objects": num,
+        "inference_time_s": inference_time,
         "objects": meta_objects,
     }
     with open(pts_dir / "metadata.json", "w") as f:
         json.dump(meta, f, indent=2)
+    return meta
 
 
 # ---------------------------------------------------------------------------
@@ -475,11 +519,23 @@ Examples:
     print()
 
     # --- Process each image ---------------------------------------------------
+    from datetime import datetime
+    import torch
+    from sam3.utils.memory_sampler import MemorySampler
+
+    pipeline_start = time.time()
+    pipeline_start_iso = datetime.now().isoformat()
+    mem_sampler = MemorySampler(interval=1.0, device=device)
+    mem_sampler.start()
+
     driver = None
+    model_load_s: Optional[float] = None
     all_memory_info: List[Dict[str, Any]] = []
+    per_image_results: List[Dict[str, Any]] = []
 
     for idx, img_path in enumerate(image_paths):
         image_name = img_path.stem
+        t_image_start = time.time()
         print(f"[{idx + 1}/{len(image_paths)}] {img_path.name}")
 
         # Memory validation
@@ -500,57 +556,137 @@ Examples:
         # Lazy-load driver
         if driver is None:
             print("  Loading model...")
+            t_model_start = time.time()
             from sam3.drivers import Sam3ImageDriver
             driver = Sam3ImageDriver(device=device)
-            print("  Model loaded.\n")
+            model_load_s = round(time.time() - t_model_start, 3)
+            print(f"  Model loaded in {model_load_s:.1f}s.\n")
 
         image = Image.open(img_path)
 
+        # Collect per-prompt / per-type results
+        prompt_results: List[Dict[str, Any]] = []
+        bbox_result: Optional[Dict[str, Any]] = None
+        points_result: Optional[Dict[str, Any]] = None
+
         # --- Text prompts (loop per prompt, separate folders) -----------------
         if args.prompts:
-            _process_image_with_text_prompts(
+            prompt_results = _process_image_with_text_prompts(
                 driver, image, args.prompts, image_name, image_output, args.alpha,
             )
 
         # --- Bounding boxes ---------------------------------------------------
         if boxes:
-            _process_image_with_bbox(
+            bbox_result = _process_image_with_bbox(
                 driver, image, boxes, [1] * len(boxes),
                 image_name, image_output, args.alpha,
             )
 
         # --- Click points -----------------------------------------------------
         if points:
-            _process_image_with_points(
+            points_result = _process_image_with_points(
                 driver, image, points, args.point_labels,
                 image_name, image_output, args.alpha,
             )
 
-        # Save overall image metadata
+        image_time = round(time.time() - t_image_start, 3)
+
+        # Build enriched objects section — aggregate from prompt results
+        objects_section: Dict[str, Any] = {}
+        if prompt_results:
+            objects_section["text_prompts"] = prompt_results
+        if bbox_result:
+            objects_section["bbox"] = bbox_result
+        if points_result:
+            objects_section["points"] = points_result
+
+        # Save enriched per-image metadata
         img_meta = {
+            "schema_version": "2.0.0",
             "image_name": image_name,
             "image_path": str(img_path.resolve()),
             "resolution": f"{image.width}x{image.height}",
+            "width": image.width,
+            "height": image.height,
+            "total_pixels": image.width * image.height,
             "prompts": args.prompts,
             "points": points,
             "boxes": boxes,
+            "device": device,
+            "timing": {
+                "image_total_s": image_time,
+            },
             "memory": mem_info,
+            "objects": objects_section,
         }
         with open(image_output / "metadata.json", "w") as f:
             json.dump(img_meta, f, indent=2, default=str)
+
+        per_image_results.append({
+            "image_name": image_name,
+            "image_path": str(img_path),
+            "processing_time_s": image_time,
+        })
 
         # Cleanup between images to free memory
         if driver is not None:
             driver.cleanup()
 
-        print(f"  ✓ Results saved to {image_output}\n")
+        print(f"  ✓ Results saved to {image_output} ({image_time:.1f}s)\n")
 
     # Cleanup
     if driver is not None:
         driver.cleanup()
 
+    # ── Stop memory sampler & compute summary ──
+    mem_sampler.stop()
+    mem_summary = mem_sampler.summary()
+
+    pipeline_end = time.time()
+    pipeline_end_iso = datetime.now().isoformat()
+    total_s = round(pipeline_end - pipeline_start, 3)
+
+    # ── Thread config ──
+    thread_config = {
+        "intra_op_threads": torch.get_num_threads(),
+        "inter_op_threads": torch.get_num_interop_threads(),
+    }
+
+    # ── SAM3 version ──
+    sam3_version = "unknown"
+    try:
+        ver_file = Path(__file__).resolve().parent / "VERSION"
+        if ver_file.exists():
+            sam3_version = ver_file.read_text().strip()
+    except Exception:
+        pass
+
+    # ── Write pipeline-level summary metadata ──
+    summary_meta = {
+        "schema_version": "2.0.0",
+        "sam3_version": sam3_version,
+        "device": device,
+        "thread_config": thread_config,
+        "num_images": len(image_paths),
+        "timing": {
+            "pipeline_start": pipeline_start_iso,
+            "pipeline_end": pipeline_end_iso,
+            "total_s": total_s,
+            "model_load_s": model_load_s,
+            "per_image": per_image_results,
+        },
+        "memory": {
+            "pre_run": all_memory_info,
+            **mem_summary,
+        },
+    }
+    summary_dir = Path(args.output) / "images"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    with open(summary_dir / "pipeline_metadata.json", "w") as f:
+        json.dump(summary_meta, f, indent=2, default=str)
+
     print("=" * 70)
-    print("  ✓ Image processing complete")
+    print(f"  ✓ Image processing complete  ({total_s:.1f}s total, model: {model_load_s or 0:.1f}s)")
     print("=" * 70)
 
 

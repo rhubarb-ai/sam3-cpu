@@ -7,8 +7,9 @@ Supports cross-chunk mask injection for seamless object continuity.
 """
 
 import json
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -126,6 +127,8 @@ class ChunkProcessor:
         if prev_chunk_data:
             logger.info(f"  Chunk {self.chunk_id}: will match IDs against previous chunk")
         
+        t_chunk_start = time.time()
+
         # Start video session for this chunk (driver already loaded, just start new session)
         logger.debug(f"  Starting video session for chunk {self.chunk_id}")
         session_id = self.driver.start_session(video_path=str(self.chunk_video_path))
@@ -154,12 +157,24 @@ class ChunkProcessor:
             self.driver.close_session(session_id)
             logger.debug(f"  Closed session for chunk {self.chunk_id} (driver still active)")
         
+        chunk_duration = round(time.time() - t_chunk_start, 3)
+
+        # Get chunk frame count for per-frame timing
+        cap = cv2.VideoCapture(str(self.chunk_video_path))
+        chunk_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+
         return {
             "chunk_id": self.chunk_id,
             "chunk_video_path": str(self.chunk_video_path),
             "prompts": prompt_results,
             "num_prompts": len(prompts),
-            "carry_forward": carry_forward
+            "carry_forward": carry_forward,
+            "timing": {
+                "chunk_total_s": chunk_duration,
+                "frames": chunk_frames,
+                "s_per_frame": round(chunk_duration / max(chunk_frames, 1), 3),
+            },
         }
     
     @staticmethod
@@ -178,13 +193,14 @@ class ChunkProcessor:
         prev_masks: Dict[int, np.ndarray],
         global_next_id: int,
         iou_threshold: float = 0.25,
-    ):
+    ) -> Tuple[dict, set, Dict[int, int], int, Dict[int, Dict[int, float]]]:
         """
         Match this chunk's objects to previous chunk objects via IoU on the first frame,
         then remap all frame outputs for consistent IDs across chunks.
 
         Returns:
-            Tuple of (remapped_result, remapped_object_ids, id_mapping, updated_global_next_id)
+            Tuple of (remapped_result, remapped_object_ids, id_mapping, updated_global_next_id, iou_matrix)
+            iou_matrix: {new_id: {prev_id: iou_float}} with ALL pairwise comparisons
         """
         if not result_prompt or not prev_masks:
             id_mapping = {}
@@ -192,13 +208,13 @@ class ChunkProcessor:
                 id_mapping[oid] = global_next_id
                 global_next_id += 1
             remapped_result = self._apply_id_mapping(result_prompt, id_mapping)
-            return remapped_result, set(id_mapping.values()), id_mapping, global_next_id
+            return remapped_result, set(id_mapping.values()), id_mapping, global_next_id, {}
 
         first_frame_idx = min(result_prompt.keys())
         first_output = result_prompt.get(first_frame_idx)
         if first_output is None:
             id_mapping = {oid: oid for oid in object_ids}
-            return result_prompt, object_ids, id_mapping, global_next_id
+            return result_prompt, object_ids, id_mapping, global_next_id, {}
 
         out_obj_ids = first_output.get("out_obj_ids", [])
         if isinstance(out_obj_ids, np.ndarray):
@@ -211,11 +227,14 @@ class ChunkProcessor:
             mask_bool = first_output["out_binary_masks"][idx]
             first_frame_masks[obj_id] = (mask_bool.astype(np.uint8) * 255)
 
-        # Greedy IoU matching
+        # Compute FULL pairwise IoU matrix
+        iou_matrix: Dict[int, Dict[int, float]] = {}
         pairs = []
         for new_id, new_mask in first_frame_masks.items():
+            iou_matrix[new_id] = {}
             for prev_id, prev_mask in prev_masks.items():
                 iou = self._compute_iou(new_mask, prev_mask)
+                iou_matrix[new_id][prev_id] = round(iou, 4)
                 if iou >= iou_threshold:
                     pairs.append((iou, new_id, prev_id))
         pairs.sort(reverse=True)
@@ -238,7 +257,7 @@ class ChunkProcessor:
 
         remapped_result = self._apply_id_mapping(result_prompt, id_mapping)
         remapped_ids = set(id_mapping.values())
-        return remapped_result, remapped_ids, id_mapping, global_next_id
+        return remapped_result, remapped_ids, id_mapping, global_next_id, iou_matrix
 
     @staticmethod
     def _apply_id_mapping(result_prompt: dict, id_mapping: Dict[int, int]) -> dict:
@@ -299,13 +318,14 @@ class ChunkProcessor:
         
         # Post-propagation ID remapping for cross-chunk consistency
         id_mapping = {}
+        iou_matrix = {}
         if prev_chunk_data and prompt in prev_chunk_data.get("masks", {}):
             prev_masks = prev_chunk_data["masks"][prompt]
             global_next_id = prev_chunk_data.get("global_next_id", {}).get(prompt, 0)
             
             if prev_masks:
                 logger.info(f"      Matching {num_objects} objects against {len(prev_masks)} from previous chunk")
-                result_prompt, object_ids, id_mapping, global_next_id = (
+                result_prompt, object_ids, id_mapping, global_next_id, iou_matrix = (
                     self._match_and_remap_ids(
                         result_prompt, object_ids,
                         prev_masks, global_next_id,
@@ -353,6 +373,7 @@ class ChunkProcessor:
             "num_objects": len(object_ids),
             "object_ids": sorted(object_ids),
             "id_mapping": {str(k): v for k, v in id_mapping.items()},
+            "iou_matrix": {str(k): {str(pk): v for pk, v in row.items()} for k, row in iou_matrix.items()} if iou_matrix else None,
             "frame_objects": frame_objects,
             "masks_dir": str(prompt_masks_dir)
         }
@@ -368,6 +389,7 @@ class ChunkProcessor:
             "num_objects": len(object_ids),
             "object_ids": sorted(object_ids),
             "id_mapping": {str(k): v for k, v in id_mapping.items()},
+            "iou_matrix": {str(k): {str(pk): v for pk, v in row.items()} for k, row in iou_matrix.items()} if iou_matrix else None,
             "frame_objects": frame_objects,
             "masks_dir": str(prompt_masks_dir),
             "metadata_path": str(prompt_metadata_path),

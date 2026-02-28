@@ -285,20 +285,26 @@ def _match_and_remap(
 ):
     """Greedy IoU matching and ID remapping.
 
-    Returns (remapped_result, remapped_ids, id_mapping, updated_next_id).
+    Returns (remapped_result, remapped_ids, id_mapping, updated_next_id, iou_matrix).
+
+    ``iou_matrix`` is a nested dict ``{new_id: {prev_id: iou}}`` with ALL
+    pairwise comparisons (not just those above the threshold).  It is ``{}``
+    for the first chunk where no previous masks exist.
     """
+    iou_matrix: Dict[int, Dict[int, float]] = {}
+
     if not result_prompt:
         mapping = {}
         for oid in sorted(object_ids):
             mapping[oid] = global_next_id
             global_next_id += 1
-        return {}, set(mapping.values()), mapping, global_next_id
+        return {}, set(mapping.values()), mapping, global_next_id, iou_matrix
 
     first_idx = min(result_prompt.keys())
     first_out = result_prompt.get(first_idx)
     if first_out is None:
         mapping = {o: o for o in object_ids}
-        return result_prompt, object_ids, mapping, global_next_id
+        return result_prompt, object_ids, mapping, global_next_id, iou_matrix
 
     out_ids = first_out.get("out_obj_ids", [])
     if isinstance(out_ids, np.ndarray):
@@ -318,8 +324,10 @@ def _match_and_remap(
     else:
         pairs = []
         for nid, nm in first_masks.items():
+            iou_matrix[nid] = {}
             for pid, pm in prev_masks.items():
                 iou = _compute_iou(nm, pm)
+                iou_matrix[nid][pid] = round(iou, 6)
                 if iou >= iou_threshold:
                     pairs.append((iou, nid, pid))
         pairs.sort(reverse=True)
@@ -350,7 +358,7 @@ def _match_and_remap(
         )
         remapped[fidx] = new_out
 
-    return remapped, set(mapping.values()), mapping, global_next_id
+    return remapped, set(mapping.values()), mapping, global_next_id, iou_matrix
 
 
 # ---------------------------------------------------------------------------
@@ -496,8 +504,9 @@ def _build_object_tracking(
 ) -> List[Dict[str, Any]]:
     """Scan stitched mask videos and compute per-object presence info.
 
-    For each object, determines the first and last frame where the mask is
-    non-empty (>= 1 % of pixels active) and translates to timestamps.
+    For each object, determines **all intervals** where the mask is active
+    (>= 1 % of pixels), handling objects that appear, disappear, and
+    reappear multiple times.
 
     Args:
         mask_dir: Directory containing ``object_{id}_mask.mp4`` files.
@@ -512,14 +521,24 @@ def _build_object_tracking(
     tracking: List[Dict[str, Any]] = []
     area_threshold = 0.01  # 1 % of frame area
 
+    def _ts(sec: float) -> str:
+        m, s = divmod(sec, 60)
+        h, m = divmod(int(m), 60)
+        return f"{h:02d}:{int(m):02d}:{s:06.3f}"
+
     for oid in sorted(object_ids):
         mp4 = mask_dir / f"object_{oid}_mask.mp4"
         if not mp4.exists():
             tracking.append({
                 "object_id": oid,
+                "intervals": [],
+                "total_frames_active": 0,
+                "total_frames": 0,
+                "total_duration_s": 0.0,
                 "first_frame": None,
                 "last_frame": None,
-                "total_frames_active": 0,
+                "first_timestamp": None,
+                "last_timestamp": None,
             })
             continue
 
@@ -529,54 +548,80 @@ def _build_object_tracking(
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_pixels = max(w * h, 1)
 
-        first_frame = None
-        last_frame = None
-        active_count = 0
-
+        # Scan all frames to build a set of active frames
+        active_frames: List[int] = []
+        mask_area_by_frame: Dict[int, float] = {}
         for fidx in range(total):
             ret, frame = cap.read()
             if not ret:
                 break
             if frame.ndim == 3:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            active = (frame > 127).sum()
-            if active / total_pixels >= area_threshold:
-                if first_frame is None:
-                    first_frame = fidx
-                last_frame = fidx
-                active_count += 1
-
+            active_px = (frame > 127).sum()
+            frac = active_px / total_pixels
+            if frac >= area_threshold:
+                active_frames.append(fidx)
+                mask_area_by_frame[fidx] = round(frac, 6)
         cap.release()
 
-        # Translate to original-video coordinates
-        abs_first = (first_frame + frame_offset) if first_frame is not None else None
-        abs_last = (last_frame + frame_offset) if last_frame is not None else None
+        # Group active frames into contiguous intervals
+        # A gap of >1 frame starts a new interval
+        intervals: List[Dict[str, Any]] = []
+        if active_frames:
+            iv_start = active_frames[0]
+            iv_end = active_frames[0]
+            for fidx in active_frames[1:]:
+                if fidx == iv_end + 1:
+                    iv_end = fidx  # extend current interval
+                else:
+                    # Close current interval, start new one
+                    abs_s = iv_start + frame_offset
+                    abs_e = iv_end + frame_offset
+                    intervals.append({
+                        "start_frame": abs_s,
+                        "end_frame": abs_e,
+                        "start_time": round(abs_s / fps, 3),
+                        "end_time": round(abs_e / fps, 3),
+                        "start_timecode": _ts(abs_s / fps),
+                        "end_timecode": _ts(abs_e / fps),
+                        "duration_frames": abs_e - abs_s + 1,
+                        "duration_s": round((abs_e - abs_s + 1) / fps, 3),
+                    })
+                    iv_start = fidx
+                    iv_end = fidx
+            # Close last interval
+            abs_s = iv_start + frame_offset
+            abs_e = iv_end + frame_offset
+            intervals.append({
+                "start_frame": abs_s,
+                "end_frame": abs_e,
+                "start_time": round(abs_s / fps, 3),
+                "end_time": round(abs_e / fps, 3),
+                "start_timecode": _ts(abs_s / fps),
+                "end_timecode": _ts(abs_e / fps),
+                "duration_frames": abs_e - abs_s + 1,
+                "duration_s": round((abs_e - abs_s + 1) / fps, 3),
+            })
+
+        active_count = len(active_frames)
+        abs_first = (active_frames[0] + frame_offset) if active_frames else None
+        abs_last = (active_frames[-1] + frame_offset) if active_frames else None
+        total_dur = round(active_count / fps, 3) if active_count else 0.0
 
         entry: Dict[str, Any] = {
             "object_id": oid,
-            "first_frame": abs_first,
-            "last_frame": abs_last,
+            "intervals": intervals,
+            "num_intervals": len(intervals),
             "total_frames_active": active_count,
             "total_frames": total,
+            "total_duration_s": total_dur,
+            "first_frame": abs_first,
+            "last_frame": abs_last,
+            "first_timestamp": round(abs_first / fps, 3) if abs_first is not None else None,
+            "last_timestamp": round(abs_last / fps, 3) if abs_last is not None else None,
+            "first_timecode": _ts(abs_first / fps) if abs_first is not None else None,
+            "last_timecode": _ts(abs_last / fps) if abs_last is not None else None,
         }
-        if abs_first is not None:
-            entry["first_timestamp"] = round(abs_first / fps, 3)
-            entry["last_timestamp"] = round(abs_last / fps, 3)
-            entry["duration_s"] = round((abs_last - abs_first + 1) / fps, 3)
-
-            def _ts(sec: float) -> str:
-                m, s = divmod(sec, 60)
-                h, m = divmod(int(m), 60)
-                return f"{h:02d}:{int(m):02d}:{s:06.3f}"
-
-            entry["first_timecode"] = _ts(abs_first / fps)
-            entry["last_timecode"] = _ts(abs_last / fps)
-        else:
-            entry["first_timestamp"] = None
-            entry["last_timestamp"] = None
-            entry["duration_s"] = 0.0
-            entry["first_timecode"] = None
-            entry["last_timecode"] = None
 
         tracking.append(entry)
 
@@ -602,9 +647,18 @@ def _process_video(
     time_range: Optional[Tuple[str, str]] = None,
 ):
     """Full video processing pipeline."""
+    from datetime import datetime
+    import torch
     from sam3.utils.ffmpeglib import ffmpeg_lib
     from sam3.utils.helpers import sanitize_filename
     from sam3.__globals import TEMP_DIR, DEFAULT_MIN_CHUNK_OVERLAP
+    from sam3.utils.memory_sampler import MemorySampler
+
+    # ── Timing & memory instrumentation ──
+    pipeline_start = time.time()
+    pipeline_start_iso = datetime.now().isoformat()
+    mem_sampler = MemorySampler(interval=1.0, device=device)
+    mem_sampler.start()
 
     video_name = video_path.stem
 
@@ -655,9 +709,11 @@ def _process_video(
 
     # ----- Load model once -----
     print("Loading SAM3 video model...")
+    t_model_start = time.time()
     from sam3.drivers import Sam3VideoDriver
     driver = Sam3VideoDriver(device=device)
-    print("Model loaded.\n")
+    model_load_s = round(time.time() - t_model_start, 3)
+    print(f"Model loaded in {model_load_s:.1f}s.\n")
 
     # ----- Validate mask dimensions (if masks provided) -----
     if mask_paths:
@@ -678,10 +734,18 @@ def _process_video(
     global_next_ids: Dict[str, int] = {}
     all_object_ids: Dict[str, set] = {}
 
+    # ── Collectors for enriched metadata ──
+    chunk_timing: List[Dict[str, Any]] = []
+    chunk_meta_list: List[Dict[str, Any]] = []
+    cross_chunk_iou: Dict[str, Dict[str, Any]] = {}
+
+    t_chunks_start = time.time()
+
     for ci, cinfo in enumerate(chunk_list):
         chunk_id = cinfo["chunk"]
         start_frame = cinfo["start"]
         end_frame = cinfo["end"]
+        t_chunk_start = time.time()
 
         print(f"── Chunk {ci + 1}/{n_chunks} (frames {start_frame}–{end_frame}) ──")
 
@@ -705,6 +769,8 @@ def _process_video(
         # Start session
         session_id = driver.start_session(video_path=str(chunk_video))
 
+        chunk_objects: Dict[str, Any] = {}  # per-prompt objects for this chunk
+
         try:
             # ----- Text prompts -----
             if prompts:
@@ -722,13 +788,28 @@ def _process_video(
                     prev_masks = carry.get(prompt, {})
                     gnid = global_next_ids.get(prompt, 0)
 
-                    result, obj_ids, mapping, gnid = _match_and_remap(
+                    result, obj_ids, mapping, gnid, iou_mat = _match_and_remap(
                         result, obj_ids, prev_masks, gnid
                     )
                     global_next_ids[prompt] = gnid
 
+                    # Store IoU matrix for cross-chunk metadata
+                    if iou_mat and ci > 0:
+                        key = f"chunk_{ci-1}_to_{ci}"
+                        cross_chunk_iou.setdefault(key, {})[prompt] = {
+                            "matrix": {str(k): {str(pk): v for pk, v in row.items()} for k, row in iou_mat.items()},
+                            "matched": {str(k): v for k, v in mapping.items()},
+                            "threshold": 0.25,
+                        }
+
                     # Track all IDs
                     all_object_ids.setdefault(prompt, set()).update(obj_ids)
+
+                    chunk_objects[prompt] = {
+                        "object_ids": sorted(obj_ids),
+                        "num_objects": len(obj_ids),
+                        "id_mapping": {str(k): v for k, v in mapping.items()},
+                    }
 
                     # Save masks
                     masks_dir = chunk_dir / "masks" / safe
@@ -769,11 +850,25 @@ def _process_video(
 
                 prev_masks = carry.get(prompt_key, {})
                 gnid = global_next_ids.get(prompt_key, 0)
-                result, obj_ids, mapping, gnid = _match_and_remap(
+                result, obj_ids, mapping, gnid, iou_mat = _match_and_remap(
                     result, obj_ids, prev_masks, gnid
                 )
                 global_next_ids[prompt_key] = gnid
                 all_object_ids.setdefault(prompt_key, set()).update(obj_ids)
+
+                if iou_mat and ci > 0:
+                    key = f"chunk_{ci-1}_to_{ci}"
+                    cross_chunk_iou.setdefault(key, {})[prompt_key] = {
+                        "matrix": {str(k): {str(pk): v for pk, v in row.items()} for k, row in iou_mat.items()},
+                        "matched": {str(k): v for k, v in mapping.items()},
+                        "threshold": 0.25,
+                    }
+
+                chunk_objects[prompt_key] = {
+                    "object_ids": sorted(obj_ids),
+                    "num_objects": len(obj_ids),
+                    "id_mapping": {str(k): v for k, v in mapping.items()},
+                }
 
                 masks_dir = chunk_dir / "masks" / safe
                 masks_dir.mkdir(parents=True, exist_ok=True)
@@ -810,11 +905,25 @@ def _process_video(
 
                 prev_masks_cf = carry.get(prompt_key, {})
                 gnid = global_next_ids.get(prompt_key, 0)
-                result, obj_ids, mapping, gnid = _match_and_remap(
+                result, obj_ids, mapping, gnid, iou_mat = _match_and_remap(
                     result, obj_ids, prev_masks_cf, gnid
                 )
                 global_next_ids[prompt_key] = gnid
                 all_object_ids.setdefault(prompt_key, set()).update(obj_ids)
+
+                if iou_mat and ci > 0:
+                    key = f"chunk_{ci-1}_to_{ci}"
+                    cross_chunk_iou.setdefault(key, {})[prompt_key] = {
+                        "matrix": {str(k): {str(pk): v for pk, v in row.items()} for k, row in iou_mat.items()},
+                        "matched": {str(k): v for k, v in mapping.items()},
+                        "threshold": 0.25,
+                    }
+
+                chunk_objects[prompt_key] = {
+                    "object_ids": sorted(obj_ids),
+                    "num_objects": len(obj_ids),
+                    "id_mapping": {str(k): v for k, v in mapping.items()},
+                }
 
                 masks_dir = chunk_dir / "masks" / safe
                 masks_dir.mkdir(parents=True, exist_ok=True)
@@ -829,10 +938,30 @@ def _process_video(
         finally:
             driver.close_session(session_id)
 
-        print()
+        chunk_dur = round(time.time() - t_chunk_start, 3)
+        chunk_timing.append({
+            "chunk_id": chunk_id,
+            "frames": chunk_frames,
+            "duration_s": chunk_dur,
+            "s_per_frame": round(chunk_dur / max(chunk_frames, 1), 3),
+        })
+        chunk_meta_list.append({
+            "chunk_id": chunk_id,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "start_frame_original": start_frame + frame_offset,
+            "end_frame_original": end_frame + frame_offset,
+            "total_frames": chunk_frames,
+            "processing_time_s": chunk_dur,
+            "objects_by_prompt": chunk_objects,
+        })
+        print(f"  Chunk {ci + 1} done in {chunk_dur:.1f}s ({chunk_dur / max(chunk_frames, 1):.2f} s/frame)\n")
+
+    chunk_processing_s = round(time.time() - t_chunks_start, 3)
 
     # ----- Stitch masks and create overlay -----
     print("Stitching masks...")
+    t_stitch_start = time.time()
     fps = video_metadata.get("fps", 25)
     w = video_metadata["width"]
     h = video_metadata["height"]
@@ -859,6 +988,23 @@ def _process_video(
             overlay_path = video_output / f"overlay_{safe}.mp4"
             _create_overlay_video(video_path, mask_vids, overlay_path, alpha)
 
+    stitching_s = round(time.time() - t_stitch_start, 3)
+
+    # ----- Per-object temporal analysis -----
+    print("Analysing object presence...")
+    t_analysis_start = time.time()
+    objects_tracking: Dict[str, List[Dict[str, Any]]] = {}
+    for pk in prompt_keys:
+        safe = sanitize_filename(pk) if not pk.startswith("__") else pk.strip("_")
+        oids = all_object_ids.get(pk, set())
+        mask_out = video_output / "masks" / safe
+        if oids and mask_out.exists():
+            objects_tracking[pk] = _build_object_tracking(
+                mask_out, oids, fps, frame_offset
+            )
+
+    analysis_s = round(time.time() - t_analysis_start, 3)
+
     # ----- Cleanup -----
     driver.cleanup()
 
@@ -871,24 +1017,86 @@ def _process_video(
     if temp_base.exists():
         shutil.rmtree(temp_base)
 
-    # Save final metadata
+    # ── Stop memory sampler ──
+    mem_sampler.stop()
+    mem_summary = mem_sampler.summary()
+
+    # ── Timing summary ──
+    pipeline_end = time.time()
+    pipeline_end_iso = datetime.now().isoformat()
+    total_s = round(pipeline_end - pipeline_start, 3)
+
+    # ── Thread config ──
+    thread_config = {
+        "intra_op_threads": torch.get_num_threads(),
+        "inter_op_threads": torch.get_num_interop_threads(),
+    }
+
+    # ── Read SAM3 version ──
+    sam3_version = "unknown"
+    try:
+        ver_file = Path(__file__).resolve().parent / "VERSION"
+        if ver_file.exists():
+            sam3_version = ver_file.read_text().strip()
+    except Exception:
+        pass
+
+    # ----- Save enriched final metadata -----
     final_meta = {
-        "video": str(video_path),
+        "schema_version": "2.0.0",
+        "sam3_version": sam3_version,
+        "video": str(original_video),
         "video_name": video_name,
         "output_dir": str(video_output),
-        "num_chunks": n_chunks,
+        "resolution": f"{w}x{h}",
+        "total_frames": video_metadata.get("nb_frames"),
+        "fps": fps,
+        "duration_s": video_metadata.get("duration"),
+        "frame_offset": frame_offset,
+        "frame_range": list(frame_range) if frame_range else None,
+        "time_range": list(time_range) if time_range else None,
+        "device": device,
+        "thread_config": thread_config,
         "prompts": prompts,
         "points": points,
         "mask_paths": [str(p) for p in mask_paths] if mask_paths else None,
-        "device": device,
-        "memory": mem_info,
+        "num_chunks": n_chunks,
+        "overlap_frames": overlap,
+        "timing": {
+            "pipeline_start": pipeline_start_iso,
+            "pipeline_end": pipeline_end_iso,
+            "total_s": total_s,
+            "model_load_s": model_load_s,
+            "chunk_processing_s": chunk_processing_s,
+            "stitching_s": stitching_s,
+            "analysis_s": analysis_s,
+            "per_chunk": chunk_timing,
+        },
+        "memory": {
+            "pre_run": mem_info,
+            **mem_summary,
+        },
+        "chunks": chunk_meta_list,
+        "cross_chunk_iou": cross_chunk_iou if cross_chunk_iou else None,
+        "objects": objects_tracking,
     }
     with open(video_output / "metadata.json", "w") as f:
         json.dump(final_meta, f, indent=2, default=str)
 
+    # Also save the detailed cross-chunk IoU separately for evaluation
+    if cross_chunk_iou:
+        with open(meta_dir / "cross_chunk_iou.json", "w") as f:
+            json.dump(cross_chunk_iou, f, indent=2, default=str)
+
+    # Also save object tracking separately for easy access
+    if objects_tracking:
+        with open(meta_dir / "object_tracking.json", "w") as f:
+            json.dump(objects_tracking, f, indent=2, default=str)
+
     print()
     print("=" * 70)
     print(f"  ✓ Video processing complete → {video_output}")
+    print(f"    Total: {total_s:.1f}s  (model: {model_load_s:.1f}s, chunks: {chunk_processing_s:.1f}s, stitch: {stitching_s:.1f}s)")
     print("=" * 70)
 
 

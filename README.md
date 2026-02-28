@@ -3,7 +3,7 @@
 **CPU-compatible wrapper around Meta's [Segment Anything Model 3 (SAM 3)](https://github.com/facebookresearch/sam3)** for image and video segmentation with intelligent memory management.
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: SAM](https://img.shields.io/badge/License-SAM-orange.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/rhubarb-ai/sam3-cpu/pulls)
 
 ## Features
@@ -14,7 +14,10 @@
 - **Cross-chunk continuity** — IoU-based mask remapping keeps object IDs consistent across chunks
 - **Text, point, box & mask prompts** — unified API for all prompt types
 - **Video segment processing** — process a specific frame range or time range instead of the full video
-- **Per-object tracking metadata** — frame ranges, timestamps, and timecodes for every detected object
+- **Interval-based object tracking** — appearance / disappearance intervals with timestamps and timecodes for every detected object
+- **Full cross-chunk IoU matrix** — complete pairwise IoU data for every chunk boundary, enabling offline evaluation
+- **Enriched metadata (v2.0.0)** — schema-versioned JSON with timing breakdown, peak / min memory tracking, per-chunk details, mask area statistics, and thread configuration
+- **Background memory sampling** — tracks peak and minimum RSS (and GPU peak) throughout the pipeline
 - **CLI tools** — `image_prompter.py` and `video_prompter.py` for quick experiments
 
 ---
@@ -31,6 +34,12 @@
 - [Python API](#python-api)
 - [Video Chunking](#video-chunking)
 - [Output Structure](#output-structure)
+- [Metadata Reference](#metadata-reference)
+  - [Schema Version](#schema-version)
+  - [Video Metadata](#video-metadata-1)
+  - [Image Metadata](#image-metadata)
+  - [Object Tracking](#object-tracking)
+  - [Cross-Chunk IoU](#cross-chunk-iou)
 - [Profiling](#profiling)
 - [Configuration](#configuration)
 - [Project Structure](#project-structure)
@@ -382,7 +391,7 @@ results back together.
 |---|---|---|
 | `ram_usage_percent` | 0.45 | Fraction of free RAM budget for frames (override in `__globals.py`) |
 | `min_frames` | 25 | Minimum frames per chunk |
-| `chunk_overlap` | 5 | Overlap frames between chunks (`DEFAULT_MIN_CHUNK_OVERLAP` in `__globals.py`) |
+| `chunk_overlap` | 1 | Overlap frames between chunks (`DEFAULT_MIN_CHUNK_OVERLAP` in `__globals.py`) |
 | `CHUNK_MASK_MATCHING_IOU_THRESHOLD` | 0.75 | IoU threshold for cross-chunk ID matching |
 
 ---
@@ -392,79 +401,292 @@ results back together.
 ### image\_prompter.py
 
 ```
-results/<image_name>/
-├── masks/
-│   ├── <prompt>/
-│   │   ├── object_0_mask.png
-│   │   ├── object_1_mask.png
-│   │   └── ...
-│   └── ...
-├── overlays/
-│   ├── overlay_<prompt>.png
-│   └── ...
-└── metadata.json
+results/images/
+├── pipeline_metadata.json          # pipeline-level timing, memory, thread config
+└── <image_name>/
+    ├── metadata.json               # enriched per-image metadata (schema v2.0.0)
+    ├── <prompt>/
+    │   ├── object_0_mask.png
+    │   ├── object_0_overlay.png
+    │   └── metadata.json           # per-prompt: scores, mask areas, inference time
+    ├── bbox/
+    │   ├── object_*_mask.png
+    │   ├── object_*_overlay.png
+    │   └── metadata.json
+    └── points/
+        ├── object_*_mask.png
+        ├── object_*_overlay.png
+        └── metadata.json
 ```
 
 ### video\_prompter.py
 
 ```
 results/<video_name>/
+├── metadata.json                   # enriched run metadata (schema v2.0.0)
+├── overlay_<prompt>.mp4            # coloured overlay on original video
 ├── masks/
-│   ├── <prompt>/
-│   │   ├── object_0_mask.mp4     # binary mask video per object
-│   │   ├── object_1_mask.mp4
-│   │   └── object_tracking.json  # per-object tracking metadata
-│   └── ...
-├── overlay_<prompt>.mp4          # coloured overlay on original video
+│   └── <prompt>/
+│       ├── object_0_mask.mp4       # binary mask video per object
+│       └── object_1_mask.mp4
 ├── metadata/
-│   ├── video_metadata.json       # fps, resolution, frame count
-│   └── memory_info.json          # RAM/VRAM budget analysis
-├── temp_files/                   # only when --keep-temp is set
-│   ├── chunk_000/
-│   │   └── masks/<prompt>/object_<id>/*.png
-│   └── ...
-└── metadata.json                 # final run metadata
+│   ├── video_metadata.json         # fps, resolution, frame count, chunk plan
+│   ├── memory_info.json            # pre-run RAM / VRAM budget analysis
+│   ├── object_tracking.json        # per-object temporal intervals
+│   └── cross_chunk_iou.json        # full pairwise IoU matrices (multi-chunk only)
+└── temp_files/                     # only when --keep-temp is set
+    └── chunks/
+        └── chunk_<id>/
+            └── masks/<prompt>/object_<id>/*.png
 ```
 
-### Object tracking metadata
+---
 
-Each `object_tracking.json` contains a list of objects with their frame
-presence, timestamps, and timecodes mapped to the **original** video
-(accounting for any `--frame-range` / `--time-range` offset):
+## Metadata Reference
+
+All metadata files follow a versioned schema so downstream tools can adapt
+to format changes.
+
+### Schema Version
+
+| Field | Type | Description |
+|---|---|---|
+| `schema_version` | `string` | Metadata format version — currently `"2.0.0"` |
+| `sam3_version` | `string` | SAM3-CPU release version (read from `VERSION` file) |
+
+### Video Metadata
+
+The top-level `metadata.json` written by `video_prompter.py` contains the
+complete run record:
+
+```jsonc
+{
+  "schema_version": "2.0.0",
+  "sam3_version": "0.1.0",
+
+  // ── Video info ──
+  "video": "assets/videos/sample.mp4",
+  "video_name": "sample",
+  "resolution": "854x480",
+  "total_frames": 200,
+  "fps": 25.0,
+  "duration_s": 8.0,
+  "frame_offset": 0,               // offset when --frame-range is used
+  "frame_range": null,              // [start, end] or null
+  "time_range": null,               // [start, end] or null
+
+  // ── Environment ──
+  "device": "cpu",
+  "thread_config": {
+    "intra_op_threads": 21,
+    "inter_op_threads": 1
+  },
+
+  // ── Prompts ──
+  "prompts": ["person", "tennis racket"],
+  "points": null,
+  "mask_paths": null,
+  "num_chunks": 1,
+  "overlap_frames": 5,
+
+  // ── Timing breakdown ──
+  "timing": {
+    "pipeline_start": "2026-02-28T13:46:13.444775",
+    "pipeline_end": "2026-02-28T13:46:48.566273",
+    "total_s": 35.121,
+    "model_load_s": 6.944,
+    "chunk_processing_s": 26.538,
+    "stitching_s": 0.078,
+    "analysis_s": 0.013,
+    "per_chunk": [
+      { "chunk_id": 0, "frames": 200, "duration_s": 26.5, "s_per_frame": 0.133 }
+    ]
+  },
+
+  // ── Memory ──
+  "memory": {
+    "pre_run": { ... },             // RAM/VRAM budget from MemoryManager
+    "peak_rss_bytes": 8008626176,
+    "peak_rss_timestamp": "2026-02-28T13:46:41.462853",
+    "min_rss_bytes": 957571072,
+    "min_rss_timestamp": "2026-02-28T13:46:13.445325",
+    "gpu_peak_allocated_bytes": null
+  },
+
+  // ── Per-chunk details ──
+  "chunks": [
+    {
+      "chunk_id": 0,
+      "start_frame": 0,
+      "end_frame": 199,
+      "start_frame_original": 0,    // relative to original video
+      "end_frame_original": 199,
+      "total_frames": 200,
+      "processing_time_s": 26.538,
+      "objects_by_prompt": {
+        "person": {
+          "object_ids": [0, 1],
+          "num_objects": 2,
+          "id_mapping": { "0": 0, "1": 1 }
+        }
+      }
+    }
+  ],
+
+  // ── Cross-chunk IoU (multi-chunk videos only) ──
+  "cross_chunk_iou": null,          // see Cross-Chunk IoU section
+
+  // ── Object presence intervals ──
+  "objects": { ... }                // see Object Tracking section
+}
+```
+
+### Image Metadata
+
+Per-image `metadata.json` written by `image_prompter.py`:
+
+```jsonc
+{
+  "schema_version": "2.0.0",
+  "image_name": "truck",
+  "image_path": "/absolute/path/to/truck.jpg",
+  "resolution": "1800x1200",
+  "width": 1800,
+  "height": 1200,
+  "total_pixels": 2160000,
+  "device": "cpu",
+  "timing": { "image_total_s": 12.34 },
+  "memory": { ... },
+  "objects": {
+    "text_prompts": [
+      {
+        "prompt": "truck",
+        "num_objects": 1,
+        "inference_time_s": 1.217,
+        "objects": [
+          {
+            "object_id": 0,
+            "score": 0.866,
+            "box": [85.7, 281.5, 1710.3, 850.6],
+            "mask_area_pixels": 636375,
+            "mask_area_pct": 29.46,
+            "mask_file": "object_0_mask.png",
+            "overlay_file": "object_0_overlay.png"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The pipeline-level `pipeline_metadata.json` adds batch-wide timing and memory:
+
+```jsonc
+{
+  "schema_version": "2.0.0",
+  "sam3_version": "0.1.0",
+  "device": "cpu",
+  "thread_config": { "intra_op_threads": 21, "inter_op_threads": 1 },
+  "num_images": 3,
+  "timing": {
+    "pipeline_start": "...",
+    "pipeline_end": "...",
+    "total_s": 38.5,
+    "model_load_s": 6.9,
+    "per_image": [
+      { "image_name": "truck", "processing_time_s": 12.3 }
+    ]
+  },
+  "memory": {
+    "peak_rss_bytes": 8008626176,
+    "peak_rss_timestamp": "...",
+    "min_rss_bytes": 957571072,
+    "min_rss_timestamp": "...",
+    "gpu_peak_allocated_bytes": null
+  }
+}
+```
+
+### Object Tracking
+
+Each object's temporal presence is modelled as a list of **contiguous
+intervals** — an object that disappears and reappears gets multiple
+intervals.  All timestamps account for `--frame-range` / `--time-range`
+offsets so they refer to the **original** video timeline.
+
+The `objects` field in the video `metadata.json` is keyed by prompt name:
 
 ```json
-[
-  {
-    "object_id": 0,
-    "first_frame": 12,
-    "last_frame": 487,
-    "total_frames_active": 476,
-    "total_frames": 500,
-    "first_timestamp": 0.48,
-    "last_timestamp": 19.48,
-    "duration_s": 19.0,
-    "first_timecode": "00:00:00.480",
-    "last_timecode": "00:00:19.480"
-  },
-  {
-    "object_id": 1,
-    "first_frame": 0,
-    "last_frame": 500,
-    "total_frames_active": 501,
-    "total_frames": 500,
-    "first_timestamp": 0.0,
-    "last_timestamp": 20.0,
-    "duration_s": 20.0,
-    "first_timecode": "00:00:00.000",
-    "last_timecode": "00:00:20.000"
-  }
-]
+{
+  "person": [
+    {
+      "object_id": 0,
+      "intervals": [
+        {
+          "start_frame": 12,
+          "end_frame": 187,
+          "start_time": 0.48,
+          "end_time": 7.48,
+          "start_timecode": "00:00:00.480",
+          "end_timecode": "00:00:07.480",
+          "duration_frames": 176,
+          "duration_s": 7.04
+        },
+        {
+          "start_frame": 210,
+          "end_frame": 487,
+          "start_time": 8.4,
+          "end_time": 19.48,
+          "start_timecode": "00:00:08.400",
+          "end_timecode": "00:00:19.480",
+          "duration_frames": 278,
+          "duration_s": 11.12
+        }
+      ],
+      "num_intervals": 2,
+      "total_frames_active": 454,
+      "total_frames": 500,
+      "total_duration_s": 18.16,
+      "first_frame": 12,
+      "last_frame": 487,
+      "first_timestamp": 0.48,
+      "last_timestamp": 19.48,
+      "first_timecode": "00:00:00.480",
+      "last_timecode": "00:00:19.480"
+    }
+  ]
+}
 ```
 
-The top-level `metadata.json` also includes:
+This data is also saved separately as `metadata/object_tracking.json` for
+convenient downstream access.
 
-- `segment` — the resolved frame range when `--frame-range` or `--time-range` is used (`null` for full-video)
-- `object_tracking` — the same per-object data keyed by prompt name
+### Cross-Chunk IoU
+
+When a video is processed in multiple chunks, the full pairwise IoU matrix
+for every chunk boundary is captured.  This lives in the top-level
+`metadata.json` under `cross_chunk_iou` and is also saved as
+`metadata/cross_chunk_iou.json`:
+
+```json
+{
+  "chunk_0_to_1": {
+    "person": {
+      "matrix": {
+        "0": { "0": 0.91, "1": 0.02 },
+        "1": { "0": 0.03, "1": 0.87 }
+      },
+      "matched": { "0": 0, "1": 1 },
+      "threshold": 0.25
+    }
+  }
+}
+```
+
+Each entry shows every new-object vs. previous-object IoU, the winner
+mapping, and the threshold used.  This is useful for offline evaluation of
+tracking quality.
 
 ---
 
@@ -606,6 +828,7 @@ sam3-cpu/
 │   ├── utils/                 # Utility modules
 │   │   ├── logger.py
 │   │   ├── helpers.py
+│   │   ├── memory_sampler.py  # Background RSS/VRAM sampler
 │   │   ├── profiler.py
 │   │   ├── system_info.py
 │   │   ├── ffmpeglib.py
@@ -804,9 +1027,10 @@ the original SAM 3 paper and this repository.
 
 ## License
 
-This project is released under the [MIT License](LICENSE).
-
-The underlying SAM 3 model weights are subject to Meta's [SAM License](https://github.com/facebookresearch/sam3/blob/main/LICENSE).
+This project is released under the **SAM License** — see [LICENSE](LICENSE) for the
+full text.  The license covers both the wrapper code and the underlying SAM 3
+model weights.  Please review the license terms before redistribution or
+commercial use.
 
 ---
 

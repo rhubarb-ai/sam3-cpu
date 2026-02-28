@@ -8,6 +8,7 @@ Handles post-processing of video chunks including:
 """
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 from collections import defaultdict
@@ -121,27 +122,32 @@ class VideoPostProcessor:
             prompts: List of prompts that were processed.
         """
         logger.info(f"Starting post-processing for {len(prompts)} prompt(s)")
+        t_post_start = time.time()
         
         # Build mappings for all prompts
         all_mappings = {}
+        all_iou_matrices = {}
         
         for prompt in prompts:
             logger.info(f"  Building mappings for prompt: '{prompt}'")
-            prompt_mappings = self._build_id_mappings(prompt)
+            prompt_mappings, prompt_iou = self._build_id_mappings(prompt)
             all_mappings[prompt] = prompt_mappings
+            if prompt_iou:
+                all_iou_matrices[prompt] = prompt_iou
         
         # Save combined mapping metadata
         logger.debug(f"    Saving combined mapping metadata...")
-        self._save_combined_mapping_metadata(all_mappings)
+        self._save_combined_mapping_metadata(all_mappings, all_iou_matrices)
         
         # Stitch masks for each prompt
         for prompt in prompts:
             logger.info(f"  Stitching masks for prompt: '{prompt}'")
             self._stitch_masks_for_prompt(prompt, all_mappings[prompt])
         
-        logger.info("Post-processing complete")
+        post_duration = round(time.time() - t_post_start, 3)
+        logger.info(f"Post-processing complete in {post_duration:.1f}s")
     
-    def _save_combined_mapping_metadata(self, all_mappings: Dict[str, Dict]):
+    def _save_combined_mapping_metadata(self, all_mappings: Dict[str, Dict], all_iou_matrices: Dict[str, Dict] = None):
         """
         Save combined ID mappings for all prompts to a single file.
         
@@ -152,6 +158,7 @@ class VideoPostProcessor:
         Args:
             all_mappings: Dictionary mapping prompts to their chunk mappings.
                          Format: {prompt: {chunk_pair: {j_id: i_id}}}
+            all_iou_matrices: Optional IoU matrices from chunk matching.
         """
         metadata_path = self.meta_output_dir / "id_mapping.json"
         
@@ -182,7 +189,8 @@ class VideoPostProcessor:
             "mappings": {
                 "by_chunk": chunk_based,
                 "by_prompt": prompt_based
-            }
+            },
+            "iou_matrices": all_iou_matrices if all_iou_matrices else None,
         }
         
         with open(metadata_path, "w") as f:
@@ -190,15 +198,17 @@ class VideoPostProcessor:
         
         logger.debug(f"      Saved combined mapping metadata to {metadata_path}")
     
-    def _build_id_mappings(self, prompt: str) -> Dict:
+    def _build_id_mappings(self, prompt: str) -> Tuple[Dict, Dict]:
         """
         Build ID mappings across all chunks for a prompt.
         
         Returns:
-            Dictionary mapping chunk pairs to local ID mappings.
-            Format: {chunk_j_id: chunk_i_id} meaning chunk_j's object maps to chunk_i's object
+            Tuple of (prompt_mappings, iou_data).
+            prompt_mappings: {chunk_pair: {j_id: i_id}} meaning chunk_j's object maps to chunk_i's object
+            iou_data: {chunk_pair: iou_matrix_dict} captured from chunk processing
         """
         prompt_mappings = {}
+        iou_data = {}
         
         # Process consecutive chunk pairs
         for i in range(len(self.chunk_results) - 1):
@@ -221,8 +231,14 @@ class VideoPostProcessor:
             # Build mapping key
             mapping_key = f"chunk_{chunk_i_id:03d}->chunk_{chunk_j_id:03d}"
             prompt_mappings[mapping_key] = mapping
+
+            # Capture IoU matrix from chunk_j if available
+            prompt_result_j = chunk_j["prompts"].get(prompt, {})
+            iou_mat = prompt_result_j.get("iou_matrix")
+            if iou_mat:
+                iou_data[mapping_key] = iou_mat
         
-        return prompt_mappings
+        return prompt_mappings, iou_data
     
     def _match_chunks(
         self,

@@ -7,6 +7,7 @@ Coordinates chunk processing and manages video-level operations.
 
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -97,11 +98,13 @@ class VideoProcessor:
         if self._video_driver is None:
             from sam3.drivers import Sam3VideoDriver
             logger.info("Initializing shared video driver (model will be loaded once)...")
+            t_model_start = time.time()
             self._video_driver = Sam3VideoDriver(
                 bpe_path=self.bpe_path,
                 num_workers=self.num_workers
             )
-            logger.info("Video driver initialized and ready for all chunks")
+            self._model_load_s = round(time.time() - t_model_start, 3)
+            logger.info(f"Video driver initialized in {self._model_load_s:.1f}s")
         return self._video_driver
     
     def _create_directories(self):
@@ -154,6 +157,14 @@ class VideoProcessor:
         """
         logger.info(f"Processing video '{self.video_name}' with {len(prompts)} prompt(s)")
         
+        from datetime import datetime
+        from sam3.utils.memory_sampler import MemorySampler
+
+        pipeline_start = time.time()
+        pipeline_start_iso = datetime.now().isoformat()
+        mem_sampler = MemorySampler(interval=1.0, device=self.device)
+        mem_sampler.start()
+
         # Step 1: Analyze video and create chunk plan
         logger.info("Step 1: Analyzing video and creating chunk plan...")
         video_metadata, video_chunks = self._create_chunk_plan(chunk_spread)
@@ -214,16 +225,48 @@ class VideoProcessor:
         else:
             self._cleanup_temp_files()
         
-        logger.info(f"Video processing complete: {self.video_name}")
+        # ── Stop memory sampler & build timing ──
+        mem_sampler.stop()
+        mem_summary = mem_sampler.summary()
+        pipeline_end = time.time()
+        pipeline_end_iso = datetime.now().isoformat()
+        total_s = round(pipeline_end - pipeline_start, 3)
+
+        # Aggregate per-chunk timing from chunk_results
+        per_chunk_timing = [
+            cr.get("timing", {}) for cr in chunk_results if "timing" in cr
+        ]
+
+        logger.info(f"Video processing complete: {self.video_name} ({total_s:.1f}s)")
         
+        # ── SAM3 version ──
+        sam3_version = "unknown"
+        try:
+            ver_file = Path(__file__).resolve().parent.parent / "VERSION"
+            if ver_file.exists():
+                sam3_version = ver_file.read_text().strip()
+        except Exception:
+            pass
+
         return {
+            "schema_version": "2.0.0",
+            "sam3_version": sam3_version,
             "video_name": self.video_name,
             "video_path": str(self.video_path),
             "output_dir": str(self.video_output_dir),
             "chunks": chunk_results,
             "prompts": prompts,
             "metadata_path": str(video_meta_path),
-            "num_chunks": len(video_chunks)
+            "num_chunks": len(video_chunks),
+            "device": self.device,
+            "timing": {
+                "pipeline_start": pipeline_start_iso,
+                "pipeline_end": pipeline_end_iso,
+                "total_s": total_s,
+                "model_load_s": getattr(self, "_model_load_s", None),
+                "per_chunk": per_chunk_timing,
+            },
+            "memory": mem_summary,
         }
     
     def _create_chunk_plan(self, chunk_spread: str) -> tuple:
