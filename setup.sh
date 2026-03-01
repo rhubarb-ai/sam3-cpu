@@ -267,6 +267,26 @@ install_python_deps() {
         log_error "Failed to install Python dependencies"
         exit 1
     fi
+
+    # 5. Install decord (platform-specific: decord2 for macOS, decord for Linux)
+    log_info "Installing decord (video decoding library)..."
+    if [ "$OS" == "macos" ]; then
+        log_info "macOS detected – installing decord2..."
+        if uv pip install decord2; then
+            log_success "decord2 installed (macOS)"
+        else
+            log_error "Failed to install decord2"
+            exit 1
+        fi
+    else
+        log_info "Linux detected – installing decord>=0.6.0..."
+        if uv pip install "decord>=0.6.0"; then
+            log_success "decord installed (Linux)"
+        else
+            log_error "Failed to install decord"
+            exit 1
+        fi
+    fi
 }
 
 # Verify installation

@@ -33,7 +33,6 @@ dependencies = [
     "einops>=0.8.2",
     "jupyter>=1.1.1",
     "notebook>=7.5.3",
-    "decord>=0.6.0",
     "opencv-python>=4.13.0.92",
     "scikit-image>=0.26.0",
     "scikit-learn>=1.8.0",
