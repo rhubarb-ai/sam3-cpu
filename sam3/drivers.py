@@ -135,7 +135,7 @@ class Sam3ImageDriver:
             #           bf16 math via VNNI or software fallback — still faster than
             #           fp32 due to halved memory bandwidth.
             # Only skip for very old CPUs (SSE-only / pre-Haswell "DEFAULT" tier).
-            if cpu_cap in ("AVX512", "AVX2"):
+            if cpu_cap in ("AVX512",):
                 torch.autocast("cpu", dtype=torch.bfloat16).__enter__()
                 logger.info(f"CPU bfloat16 autocast ENABLED (capability: {cpu_cap})")
             else:
@@ -569,7 +569,7 @@ class Sam3VideoDriver:
             #           bf16 math via VNNI or software fallback — still faster than
             #           fp32 due to halved memory bandwidth.
             # Only skip for very old CPUs (SSE-only / pre-Haswell "DEFAULT" tier).
-            if cpu_cap in ("AVX512", "AVX2"):
+            if cpu_cap in ("AVX512",):
                 torch.autocast("cpu", dtype=torch.bfloat16).__enter__()
                 logger.info(f"CPU bfloat16 autocast ENABLED (capability: {cpu_cap})")
             else:
