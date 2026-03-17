@@ -731,8 +731,12 @@ class MemoryPredictor:
         step = 0
         while self._running:
             # Exponential sampling schedule
+            try:
+                from sam3.__globals import POLL_BACKOFF_MAX_STEP
+            except ImportError:
+                POLL_BACKOFF_MAX_STEP = 50
             interval = min(
-                self._poll_base * (1.2**step),
+                self._poll_base * (1.2 ** min(step, POLL_BACKOFF_MAX_STEP)),
                 self._poll_max,
             )
             time.sleep(interval)
