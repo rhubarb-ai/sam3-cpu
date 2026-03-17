@@ -103,6 +103,12 @@ CARRY_MIN_FREE_RAM_GB = 1.0  # Drop carry entries when free RAM drops below 1 GB
 # frames, so 6 is the effective useful maximum.
 MEMORY_BANK_MAX_FRAMES = 6
 
+# Maximum exponent step for the background memory predictor's exponential
+# backoff schedule.  After this many iterations the polling interval is
+# already well past poll_max, so further exponentiation is pointless and
+# would overflow float64 on very long runs (>5000 frames).
+POLL_BACKOFF_MAX_STEP = 50
+
 # Parallel processing
 PARALLEL_CHUNK_THRESHOLD = 0.90  # Start loading next chunk at 90% completion
 
