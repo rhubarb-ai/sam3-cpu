@@ -1081,16 +1081,24 @@ class AdaptiveChunkManager:
         remaining_start: int,
         total_frames: int,
         overlap: int = 1,
+        start_chunk_id: int = 0,
     ) -> list:
         """Generate new chunk plan for remaining frames with current chunk size.
 
         Returns a list of ``{"chunk": i, "start": s, "end": e}`` dicts.
+
+        Parameters
+        ----------
+        start_chunk_id : int
+            Chunk ID to assign to the first replanned chunk. This matters when
+            chunk outputs are written to ``chunk_{id}`` directories and later
+            stitched back together by ID.
         """
         chunk_size = self.current_chunk_size
         stride = max(chunk_size - overlap, 1)
         chunks = []
         start = remaining_start
-        idx = 0
+        idx = start_chunk_id
         while start < total_frames:
             end = min(start + chunk_size - 1, total_frames - 1)
             if end > start:
