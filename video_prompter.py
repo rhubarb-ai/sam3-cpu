@@ -1430,7 +1430,7 @@ def _process_video(
                     print(f"  Prompt: '{prompt}'")
 
                     driver.reset_session(session_id)
-
+                    
                     # ── Cross-chunk mask injection ──
                     # Inject carry masks from previous chunk as conditioning frames
                     # BEFORE adding the text prompt.  This gives the tracker memory
@@ -1463,9 +1463,18 @@ def _process_video(
                         except Exception as _mb_err:
                             print(f"\033[93m    ⚠ Memory bank restore failed: {_mb_err}\033[0m")
 
-                    driver.add_prompt(session_id, prompt)
+                    
 
                     # ── Monitored streaming propagation ──
+                    # If cross-chunk carry was injected successfully, propagate those
+                    # carried objects directly. Re-running the text prompt here causes
+                    # fresh instance discovery on every chunk boundary, which explodes
+                    # the object count for broad prompts like "player".
+                    if _injected_carry:
+                        print("    ↳ Reusing injected objects; skipping text re-detection")
+                    else:
+                        driver.add_prompt(session_id, prompt)
+
                     # Use frame cap from any prior prompt's early stop
                     effective_frames = _chunk_frame_cap if _chunk_frame_cap else chunk_frames
                     expected_iters = effective_frames * 2  # "both" → forward + backward
@@ -2107,7 +2116,12 @@ def _process_video(
                     f"new chunk size = {new_size} frames"
                 )
 
-                new_chunks = adaptive.replan_remaining(resume_frame, total_frames_in_video, overlap)
+                new_chunks = adaptive.replan_remaining(
+                    resume_frame,
+                    total_frames_in_video,
+                    overlap,
+                    start_chunk_id=ci + 1,
+                )
                 if not new_chunks:
                     print("\033[91m  ✗ No viable chunks after OOM reduction\033[0m")
                     break
@@ -2116,7 +2130,12 @@ def _process_video(
                 chunk_cursor += 1  # advance past partial chunk
             else:
                 # No partial frames — retry from start_frame (old behavior)
-                new_chunks = adaptive.replan_remaining(start_frame, total_frames_in_video, overlap)
+                new_chunks = adaptive.replan_remaining(
+                    start_frame,
+                    total_frames_in_video,
+                    overlap,
+                    start_chunk_id=ci + 1,
+                )
                 if not new_chunks:
                     print("\033[91m  ✗ No viable chunks after OOM reduction\033[0m")
                     break
@@ -2279,7 +2298,12 @@ def _process_video(
                     f"Next chunk: {current_chunk_frames} → {safe_frames} frames\033[0m"
                 )
 
-                new_chunks = adaptive.replan_remaining(resume_frame, total_frames_in_video, overlap)
+                new_chunks = adaptive.replan_remaining(
+                    resume_frame,
+                    total_frames_in_video,
+                    overlap,
+                    start_chunk_id=ci + 1,
+                )
                 if not new_chunks:
                     print("\033[91m  ✗ No viable chunks after proactive resizing\033[0m")
                     break
@@ -2295,7 +2319,12 @@ def _process_video(
                     f"Next chunk: {current_chunk_frames} → {safe_frames} frames\033[0m"
                 )
 
-                new_chunks = adaptive.replan_remaining(start_frame, total_frames_in_video, overlap)
+                new_chunks = adaptive.replan_remaining(
+                    start_frame,
+                    total_frames_in_video,
+                    overlap,
+                    start_chunk_id=ci + 1,
+                )
                 if not new_chunks:
                     print("\033[91m  ✗ No viable chunks after proactive resizing\033[0m")
                     break
@@ -2348,7 +2377,12 @@ def _process_video(
             # Replan remaining chunks with smaller size
             next_start = end_frame + 1 - overlap
             if next_start < total_frames_in_video:
-                new_chunks = adaptive.replan_remaining(next_start, total_frames_in_video, overlap)
+                new_chunks = adaptive.replan_remaining(
+                    next_start,
+                    total_frames_in_video,
+                    overlap,
+                    start_chunk_id=ci + 1,
+                )
                 chunk_list = chunk_list[: chunk_cursor + 1] + new_chunks
                 n_chunks = len(chunk_list)
                 print(f"  Replanned: {len(new_chunks)} chunk(s) remaining")
@@ -2361,7 +2395,12 @@ def _process_video(
             )
             next_start = end_frame + 1 - overlap
             if next_start < total_frames_in_video:
-                new_chunks = adaptive.replan_remaining(next_start, total_frames_in_video, overlap)
+                new_chunks = adaptive.replan_remaining(
+                    next_start,
+                    total_frames_in_video,
+                    overlap,
+                    start_chunk_id=ci + 1,
+                )
                 chunk_list = chunk_list[: chunk_cursor + 1] + new_chunks
                 n_chunks = len(chunk_list)
 
@@ -2443,6 +2482,12 @@ def _process_video(
         oids = all_object_ids.get(pk, set())
         out = video_output / "masks" / safe
 
+        # Clear previous stitched outputs for this prompt so reruns do not
+        # leak stale object videos into the new overlay.
+        if out.exists():
+            shutil.rmtree(out)
+        out.mkdir(parents=True, exist_ok=True)
+
         # ── Stitch per-chunk mask MP4s into final per-object mask MP4s ──
         from sam3.streaming_masks import create_overlay_from_masks, stitch_chunk_mask_videos
 
@@ -2452,6 +2497,8 @@ def _process_video(
         mask_vids = sorted(out.glob("object_*_mask.mp4"))
         if mask_vids:
             overlay_path = video_output / f"overlay_{safe}.mp4"
+            if overlay_path.exists():
+                overlay_path.unlink()
             create_overlay_from_masks(video_path, mask_vids, overlay_path, alpha)
 
     stitching_s = round(time.time() - t_stitch_start, 3)
