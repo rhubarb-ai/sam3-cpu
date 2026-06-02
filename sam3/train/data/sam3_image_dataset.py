@@ -17,7 +17,6 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 import torch
 import torch.utils.data
 import torchvision
-from decord import cpu, VideoReader
 from iopath.common.file_io import g_pathmgr
 from PIL import Image as PILImage
 from PIL.Image import DecompressionBombError
@@ -203,7 +202,8 @@ class CustomCocoDetectionAPI(VisionDataset):
                 if ".mp4" in path and path[-4:] == ".mp4":
                     # Going to load a video frame
                     video_path, frame = path.split("@")
-                    video = VideoReader(video_path, ctx=cpu(0))
+                    import decord  # lazy import — not needed at inference time
+                    video = decord.VideoReader(video_path, ctx=decord.cpu(0))
                     # Convert to PIL image
                     all_images.append(
                         (
